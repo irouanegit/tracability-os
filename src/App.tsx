@@ -11,15 +11,31 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import { AppWindowIcon, CodeIcon } from "lucide-react";
 import "./styles.css";
 import { FabricationDiagramWorkspace } from "./FabricationDiagramWorkspace";
+import { ProductionTraceabilityDiagram } from "./ProductionTraceabilityDiagram";
+import { TraceabilityLoader } from "./TraceabilityLoader";
 import { generateProductionLotNumber } from "./lib/productionLotCodification";
+import {
+  buildProductionPdfData,
+  buildProductionPdfDataFromBatch,
+  buildProductionPdfDataFromBatchSchema,
+  downloadProductionTraceabilityBatchPdf,
+  downloadProductionTraceabilityPdf,
+  openProductionPdfFile,
+} from "./lib/productionTraceabilityPdf";
+import { downloadReceptionQualityPdf, type ReceptionQualityPdfGroup } from "./lib/receptionQualityPdf";
 import { isSupabaseConfigured } from "./lib/supabase";
 import {
   createProductionWithTraceability,
   createSupplier,
   createRawMaterialCatalogItem,
+  deleteProductionBatches,
+  updateProductCatalogItem,
+  updateRawMaterialCatalogItem,
   createReceptionBatch,
+  updateReceptionBatch,
   createProductCatalogItem,
   createReception,
   fetchAvailableLotsForProduct,
@@ -30,6 +46,7 @@ import {
   fetchLotStockPreview,
   fetchProductCatalog,
   fetchProductSchema,
+  fetchProductSchemaDiagram,
   fetchRecentReceptions,
   fetchSupplierMaterialAssignments,
   fetchSupplierRawMaterialCatalog,
@@ -49,6 +66,7 @@ import {
   type ReceptionBatchLine,
   type ReceptionBatchLineInput,
   type ProductSchemaNode,
+  type ProductSchemaDiagram,
   type ProductType,
   type RecentReception,
   type RecipeStatus,
@@ -61,7 +79,7 @@ type CanvasPosition = { x: number; y: number };
 type ThemeMode = "dark" | "light";
 type SupplierTab = "info" | "materials" | "history";
 type SupplierFormState = { name: string; contact: string };
-type RawMaterialFormState = { name: string; unit: "piece" | "kg" };
+type RawMaterialFormState = { id?: string; name: string; unit: "piece" | "kg"; supplierId?: string };
 type ComboOption<T extends string = string> = { value: T; label: string };
 type AppBadgeVariant = ProductType | RecipeStatus | ReceptionStatus | "neutral";
 type AppButtonVariant = "primary" | "secondary" | "ghostDanger" | "blue" | "dangerSoft";
@@ -90,10 +108,12 @@ type IconName =
   | "dots"
   | "grip"
   | "plus"
+  | "x"
   | "sun"
   | "moon";
 type ReceptionDraftLine = {
   localId: string;
+  lineId?: string;
   productId: string;
   productCode: string;
   productName: string;
@@ -113,6 +133,14 @@ type ProductionComponentDraft = {
   confirmed: boolean;
   status: "loading" | "ready" | "error";
 };
+type ProductColumnFilterKey = "name" | "type" | "category" | "recipeStatus" | "componentCount" | "lastUpdated" | "lot" | "productionDate" | "confirmedAt";
+type ProductColumnFilter = { id: string; column: ProductColumnFilterKey; value: string };
+
+type ProductColumnFilterOption = {
+  key: ProductColumnFilterKey;
+  label: string;
+  description: string;
+};
 
 const typeLabels: Record<ProductType, string> = {
   raw: "Matiere premiere",
@@ -126,6 +154,15 @@ const recipeLabels: Record<RecipeStatus, string> = {
   not_required: "Non requis",
 };
 
+const productColumnFilterOptions: ProductColumnFilterOption[] = [
+  { key: "name", label: "produit", description: "Nom produit" },
+  { key: "type", label: "type", description: "Matiere premiere, semi-fini, produit fini" },
+  { key: "category", label: "categorie", description: "Beldi, boulangerie, cake, patisserie, viennoiserie" },
+  { key: "recipeStatus", label: "recette", description: "Active, manquante, non requis" },
+  { key: "componentCount", label: "composants", description: "Nombre de composants" },
+  { key: "lastUpdated", label: "derniere_modification", description: "Date de modification" },
+];
+
 const categoryLabels: Record<ProductCategory, string> = {
   beldi: "Beldi",
   boulangerie: "Boulangerie",
@@ -133,6 +170,28 @@ const categoryLabels: Record<ProductCategory, string> = {
   patisserie: "Patisserie",
   viennoiserie: "Viennoiserie",
 };
+
+const productColumnValueSuggestions: Partial<Record<ProductColumnFilterKey, string[]>> = {
+  type: [typeLabels.raw, typeLabels.semi_finished, typeLabels.finished],
+  category: Object.values(categoryLabels),
+  recipeStatus: [recipeLabels.active, recipeLabels.missing, recipeLabels.not_required],
+};
+
+const productionHistoryColumnFilterOptions: ProductColumnFilterOption[] = [
+  { key: "name", label: "produit", description: "Nom produit" },
+  { key: "type", label: "type", description: "Semi-fini, produit fini" },
+  { key: "category", label: "categorie", description: "Beldi, boulangerie, cake, patisserie, viennoiserie" },
+  { key: "lot", label: "lot", description: "Lot de production" },
+  { key: "productionDate", label: "date_production", description: "Date de production" },
+  { key: "confirmedAt", label: "date_confirmation", description: "Date de confirmation" },
+];
+
+const productionHistoryColumnValueSuggestions: Partial<Record<ProductColumnFilterKey, string[]>> = {
+  type: [typeLabels.semi_finished, typeLabels.finished],
+  category: Object.values(categoryLabels),
+};
+
+const emptyProductSchemaNodes: ProductSchemaNode[] = [];
 
 const unitOptions: ComboOption[] = [
   { value: "kg", label: "kg" },
@@ -155,6 +214,12 @@ const manufacturedProductTypeOptions: ComboOption<Exclude<ProductType, "raw">>[]
   { value: "semi_finished", label: "Semi-fini" },
 ];
 
+const productTypeEditOptions: ComboOption<ProductType>[] = [
+  { value: "raw", label: "Matiere premiere" },
+  { value: "semi_finished", label: "Semi-fini" },
+  { value: "finished", label: "Produit fini" },
+];
+
 const rowsPerPageOptions: ComboOption[] = [
   { value: "10", label: "10" },
   { value: "20", label: "20" },
@@ -164,6 +229,10 @@ const rowsPerPageOptions: ComboOption[] = [
 
 const todayInputValue = toInputDateValue(new Date());
 const calendarWeekdays = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
+const calendarMonthOptions = Array.from({ length: 12 }, (_, monthIndex) => ({
+  value: String(monthIndex),
+  label: capitalize(new Intl.DateTimeFormat("fr-FR", { month: "long" }).format(new Date(2026, monthIndex, 1))),
+}));
 const canvasWidth = 2200;
 const canvasHeight = 1400;
 const canvasCardWidth = 236;
@@ -172,7 +241,11 @@ const canvasCardHeight = 150;
 function App() {
   const [activeView, setActiveView] = useState<ViewId>("reception");
   const [receptionScreen, setReceptionScreen] = useState<"list" | "details">("list");
+  const [receptionDraftResetKey, setReceptionDraftResetKey] = useState(0);
+  const [editingReceptionBatchIds, setEditingReceptionBatchIds] = useState<string[] | null>(null);
   const [fabricationScreen, setFabricationScreen] = useState<"list" | "schema">("list");
+  const [fabricationProductColumnFilters, setFabricationProductColumnFilters] = useState<ProductColumnFilter[]>([]);
+  const [fabricationSchemaSidebarCollapsed, setFabricationSchemaSidebarCollapsed] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
   const [selectedFabricationProduct, setSelectedFabricationProduct] = useState<Product | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
@@ -224,8 +297,6 @@ function App() {
 
   function handleNavigate(view: ViewId) {
     setActiveView(view);
-    if (view === "reception") setReceptionScreen("list");
-    if (view === "fabrication") setFabricationScreen("list");
   }
 
   if (activeView === "fabrication" && fabricationScreen === "schema") {
@@ -233,6 +304,7 @@ function App() {
       <div className="diagram-app-shell">
         <FabricationDiagramWorkspace
           initialProduct={selectedFabricationProduct}
+          initialProductSidebarCollapsed={fabricationSchemaSidebarCollapsed}
           products={products}
           onBack={() => setFabricationScreen("list")}
           onSchemaSaved={async () => {
@@ -248,56 +320,101 @@ function App() {
       <Sidebar activeView={activeView} onNavigate={handleNavigate} />
       <div className="workspace">
         <Topbar dataStatus={dataStatus} theme={theme} onThemeToggle={() => setTheme((current) => (current === "dark" ? "light" : "dark"))} />
-        {activeView === "reception" && receptionScreen === "list" ? (
+        <CachedScreen active={activeView === "reception" && receptionScreen === "list"}>
           <ReceptionList
             receptionBatches={receptionBatches}
             selectedBatchId={selectedReceptionBatchId}
-            onCreate={() => setReceptionScreen("details")}
+            onCreate={() => {
+              setEditingReceptionBatchIds(null);
+              setReceptionScreen("details");
+            }}
+            onEdit={(batchIds) => {
+              setEditingReceptionBatchIds(batchIds);
+              setReceptionScreen("details");
+            }}
             onSelectBatch={setSelectedReceptionBatchId}
           />
-        ) : null}
-        {activeView === "reception" && receptionScreen === "details" ? (
+        </CachedScreen>
+        <CachedScreen active={activeView === "reception" && receptionScreen === "details"}>
           <ReceptionDetails
+            key={receptionDraftResetKey}
+            editingBatches={
+              editingReceptionBatchIds
+                ? editingReceptionBatchIds.flatMap((batchId) => receptionBatches.find((batch) => batch.id === batchId) ?? [])
+                : []
+            }
             suppliers={suppliers}
-            onBack={() => setReceptionScreen("list")}
+            onBack={() => {
+              setReceptionScreen("list");
+              setEditingReceptionBatchIds(null);
+              setReceptionDraftResetKey((current) => current + 1);
+            }}
             onReceptionSaved={async (batchId) => {
               await loadSupabaseData();
               setSelectedReceptionBatchId(batchId);
               setReceptionScreen("list");
+              setEditingReceptionBatchIds(null);
+              setReceptionDraftResetKey((current) => current + 1);
             }}
           />
-        ) : null}
-        {activeView === "fabrication" && fabricationScreen === "list" ? (
+        </CachedScreen>
+        <CachedScreen active={activeView === "fabrication" && fabricationScreen === "list"}>
           <FabricationList
+            columnFilters={fabricationProductColumnFilters}
             onProductSaved={loadSupabaseData}
             products={products}
+            onColumnFiltersChange={setFabricationProductColumnFilters}
             onCreate={() => {
               setSelectedFabricationProduct(null);
+              setFabricationSchemaSidebarCollapsed(false);
               setFabricationScreen("schema");
             }}
             onSelect={(product) => {
               setSelectedFabricationProduct(product);
+              setFabricationSchemaSidebarCollapsed(product.recipeStatus === "active");
               setFabricationScreen("schema");
             }}
           />
-        ) : null}
-        {activeView === "production" ? (
+        </CachedScreen>
+        <CachedScreen active={activeView === "production"}>
           <ProductionModule
             batches={productionBatches}
             products={products}
             selectedBatchId={selectedProductionBatchId}
+            onProductionDeleted={async (deletedBatchIds) => {
+              setSelectedProductionBatchId((current) => (deletedBatchIds.includes(current) ? "" : current));
+              await loadSupabaseData();
+            }}
             onProductionSaved={async (batchId) => {
               await loadSupabaseData();
               setSelectedProductionBatchId(batchId);
             }}
             onSelectBatch={setSelectedProductionBatchId}
           />
-        ) : null}
-        {activeView === "suppliers" ? <SuppliersModule products={products} suppliers={suppliers} onSuppliersChanged={loadSupabaseData} /> : null}
-        {activeView !== "reception" && activeView !== "fabrication" && activeView !== "production" && activeView !== "suppliers" ? (
+        </CachedScreen>
+        <CachedScreen active={activeView === "suppliers"}>
+          <SuppliersModule products={products} suppliers={suppliers} onSuppliersChanged={loadSupabaseData} />
+        </CachedScreen>
+        <CachedScreen active={activeView !== "reception" && activeView !== "fabrication" && activeView !== "production" && activeView !== "suppliers"}>
           <EmptyModule activeView={activeView} />
-        ) : null}
+        </CachedScreen>
       </div>
+    </div>
+  );
+}
+
+function CachedScreen({ active, children }: { active: boolean; children: ReactNode }) {
+  const [hasMounted, setHasMounted] = useState(active);
+
+  useEffect(() => {
+    if (active) setHasMounted(true);
+  }, [active]);
+
+  if (!hasMounted) return null;
+
+  return (
+    <div aria-hidden={!active} className={cx("cached-screen", active && "active")}>
+      {children}
     </div>
   );
 }
@@ -306,19 +423,33 @@ function ReceptionList({
   receptionBatches,
   selectedBatchId,
   onCreate,
+  onEdit,
   onSelectBatch,
 }: {
   receptionBatches: ReceptionBatch[];
   selectedBatchId: string;
   onCreate: () => void;
+  onEdit: (batchIds: string[]) => void;
   onSelectBatch: (batchId: string) => void;
 }) {
   const [batchLines, setBatchLines] = useState<ReceptionBatchLine[]>([]);
   const [lineStatus, setLineStatus] = useState<"idle" | "loading" | "error">("idle");
-  const selectedBatch = receptionBatches.find((batch) => batch.id === selectedBatchId) ?? receptionBatches[0] ?? null;
+  const [selectedPdfGroupKeys, setSelectedPdfGroupKeys] = useState<string[]>([]);
+  const [receptionPdfStatus, setReceptionPdfStatus] = useState<"idle" | "exporting" | "success" | "error">("idle");
+  const [receptionPdfMessage, setReceptionPdfMessage] = useState("");
+  const [receptionPdfAlert, setReceptionPdfAlert] = useState<{ filePath: string; description: string } | null>(null);
+  const receptionGroups = useMemo(() => groupReceptionBatchesBySupplierAndDate(receptionBatches), [receptionBatches]);
+  const selectedGroup = receptionGroups.find((group) => group.batches.some((batch) => batch.id === selectedBatchId)) ?? receptionGroups[0] ?? null;
+  const selectedPdfGroups = receptionGroups.filter((group) => selectedPdfGroupKeys.includes(group.key));
+  const allReceptionGroupsSelected = receptionGroups.length > 0 && selectedPdfGroupKeys.length === receptionGroups.length;
 
   useEffect(() => {
-    if (!selectedBatch) {
+    const availableKeys = new Set(receptionGroups.map((group) => group.key));
+    setSelectedPdfGroupKeys((current) => current.filter((key) => availableKeys.has(key)));
+  }, [receptionGroups]);
+
+  useEffect(() => {
+    if (!selectedGroup) {
       setBatchLines([]);
       setLineStatus("idle");
       return;
@@ -328,9 +459,9 @@ function ReceptionList({
     async function loadLines() {
       setLineStatus("loading");
       try {
-        const lines = await fetchReceptionBatchLines(selectedBatch.id);
+        const groupLines = await Promise.all(selectedGroup.batches.map((batch) => fetchReceptionBatchLines(batch.id)));
         if (!cancelled) {
-          setBatchLines(lines);
+          setBatchLines(groupLines.flat());
           setLineStatus("idle");
         }
       } catch (error) {
@@ -344,9 +475,75 @@ function ReceptionList({
     return () => {
       cancelled = true;
     };
-  }, [selectedBatch?.id]);
+  }, [selectedGroup?.key]);
+
+  function toggleReceptionPdfGroup(groupKey: string) {
+    setReceptionPdfMessage("");
+    setReceptionPdfAlert(null);
+    setSelectedPdfGroupKeys((current) => (current.includes(groupKey) ? current.filter((key) => key !== groupKey) : [...current, groupKey]));
+  }
+
+  function toggleAllReceptionPdfGroups() {
+    setReceptionPdfMessage("");
+    setReceptionPdfAlert(null);
+    setSelectedPdfGroupKeys(allReceptionGroupsSelected ? [] : receptionGroups.map((group) => group.key));
+  }
+
+  async function handleExportSelectedReceptionPdf() {
+    if (selectedPdfGroups.length === 0) return;
+
+    setReceptionPdfStatus("exporting");
+    setReceptionPdfMessage("");
+    setReceptionPdfAlert(null);
+
+    try {
+      const groups: ReceptionQualityPdfGroup[] = await Promise.all(
+        selectedPdfGroups.map(async (group) => {
+          const groupLines = await Promise.all(group.batches.map((batch) => fetchReceptionBatchLines(batch.id)));
+          return {
+            batchNumbers: group.batchNumbers,
+            dateLabel: group.dateLabel,
+            lines: groupLines.flat(),
+            supplierName: group.supplierName,
+          };
+        }),
+      );
+
+      const result = await downloadReceptionQualityPdf(groups);
+      const exportedFilePath = "filePath" in result && typeof result.filePath === "string" ? result.filePath : "";
+      const location = exportedFilePath || "telechargement lance";
+      setReceptionPdfStatus("success");
+      if (exportedFilePath) {
+        setReceptionPdfMessage("");
+        setReceptionPdfAlert({
+          filePath: exportedFilePath,
+          description: `PDF reception exporte: ${location}`,
+        });
+      } else {
+        setReceptionPdfMessage(`PDF reception exporte: ${location}`);
+      }
+    } catch (error) {
+      console.error("Reception quality PDF export failed", error);
+      setReceptionPdfStatus("error");
+      setReceptionPdfMessage(formatApiError(error, "Impossible d'exporter le PDF reception."));
+      setReceptionPdfAlert(null);
+    }
+  }
+
+  async function handleOpenReceptionPdfAlert() {
+    if (!receptionPdfAlert) return;
+
+    try {
+      await openProductionPdfFile(receptionPdfAlert.filePath);
+    } catch (error) {
+      console.error("Open reception PDF failed", error);
+      setReceptionPdfStatus("error");
+      setReceptionPdfMessage(formatApiError(error, "Impossible d'ouvrir le PDF reception."));
+    }
+  }
 
   return (
+    <>
     <main className="page reception-overview-page">
       <AppCard className="reception-history-panel reception-overview-panel">
         <div className="table-toolbar">
@@ -358,6 +555,10 @@ function ReceptionList({
             </div>
           </div>
           <div className="table-actions">
+            <AppButton compact disabled={receptionPdfStatus === "exporting" || selectedPdfGroups.length === 0} onClick={() => void handleExportSelectedReceptionPdf()} type="button" variant="secondary">
+              <AppIcon name="file" />
+              {receptionPdfStatus === "exporting" ? <TraceabilityLoader compact label="Export..." /> : "Exporter PDF"}
+            </AppButton>
             <AppButton compact onClick={onCreate} type="button">
               Nouvelle reception
             </AppButton>
@@ -368,6 +569,18 @@ function ReceptionList({
           <table>
             <thead>
               <tr>
+                <th className="selection-cell">
+                  <label className="table-checkbox">
+                    <input
+                      aria-label="Selectionner toutes les receptions pour le PDF"
+                      checked={allReceptionGroupsSelected}
+                      disabled={receptionGroups.length === 0}
+                      onChange={toggleAllReceptionPdfGroups}
+                      type="checkbox"
+                    />
+                    <span></span>
+                  </label>
+                </th>
                 <th>Date</th>
                 <th>Fournisseur</th>
                 <th>Lot reception</th>
@@ -378,29 +591,41 @@ function ReceptionList({
             </thead>
             <tbody>
               {receptionBatches.length === 0 ? (
-                <TableEmpty colSpan={6}>Aucune reception batch enregistree.</TableEmpty>
+                <TableEmpty colSpan={7}>Aucune reception batch enregistree.</TableEmpty>
               ) : null}
-              {receptionBatches.map((batch) => (
+              {receptionGroups.map((group) => (
                 <tr
-                  className={cx(batch.id === selectedBatch?.id && "selected-row")}
-                  key={batch.id}
-                  onClick={() => onSelectBatch(batch.id)}
+                  className={cx(group.key === selectedGroup?.key && "selected-row")}
+                  key={group.key}
+                  onClick={() => onSelectBatch(group.batches[0].id)}
                 >
-                  <td>{formatDateTime(batch.receptionDate)}</td>
-                  <td>{batch.supplierName}</td>
-                  <td>
-                    <strong>{batch.batchNumber}</strong>
+                  <td className="selection-cell" onClick={(event) => event.stopPropagation()}>
+                    <label className="table-checkbox">
+                      <input
+                        aria-label={`Selectionner ${group.supplierName} ${group.dateLabel} pour le PDF`}
+                        checked={selectedPdfGroupKeys.includes(group.key)}
+                        onChange={() => toggleReceptionPdfGroup(group.key)}
+                        type="checkbox"
+                      />
+                      <span></span>
+                    </label>
                   </td>
-                  <td>{batch.articleCount}</td>
-                  <td>{batch.quantitySummary}</td>
+                  <td>{group.dateLabel}</td>
+                  <td>{group.supplierName}</td>
                   <td>
-                    <ReceptionStatusBadge status={batch.status} />
+                    <strong>{group.batchNumbers[0]}</strong>
+                  </td>
+                  <td>{group.articleCount}</td>
+                  <td>{group.quantitySummary}</td>
+                  <td>
+                    <ReceptionStatusBadge status={group.status} />
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {receptionPdfMessage ? <p className={cx("save-message reception-pdf-message", receptionPdfStatus === "error" ? "error" : "success")}>{receptionPdfMessage}</p> : null}
       </AppCard>
 
       <AppCard className="reception-history-panel reception-overview-panel">
@@ -409,25 +634,118 @@ function ReceptionList({
             <span className="panel-icon">DL</span>
             <div>
               <h2>Articles de la reception</h2>
-              <p>{selectedBatch ? selectedBatch.batchNumber : "Aucun lot selectionne"}</p>
+              <p>{selectedGroup ? `${selectedGroup.supplierName} - ${selectedGroup.dateLabel}` : "Aucun lot selectionne"}</p>
             </div>
+          </div>
+          <div className="table-actions">
+            <AppButton compact disabled={!selectedGroup} onClick={() => selectedGroup && onEdit(selectedGroup.batches.map((batch) => batch.id))} type="button" variant="secondary">
+              Editer
+            </AppButton>
           </div>
         </div>
         <ReceptionBatchLinesTable lines={batchLines} status={lineStatus} />
       </AppCard>
     </main>
+    {receptionPdfAlert ? (
+      <div aria-live="polite" className="production-pdf-alert" role="status">
+        <div className="production-pdf-alert-content">
+          <strong>PDF exporte</strong>
+          <p>{receptionPdfAlert.description}</p>
+        </div>
+        <AppButton compact onClick={() => void handleOpenReceptionPdfAlert()} type="button">
+          Open
+        </AppButton>
+        <AppButton aria-label="Fermer l'alerte PDF" compact onClick={() => setReceptionPdfAlert(null)} title="Fermer" type="button" variant="secondary">
+          <AppIcon name="x" />
+        </AppButton>
+      </div>
+    ) : null}
+    </>
   );
 }
 
+function groupReceptionBatchesBySupplierAndDate(receptionBatches: ReceptionBatch[]) {
+  const groups = new Map<
+    string,
+    {
+      key: string;
+      supplierName: string;
+      dateLabel: string;
+      batchNumbers: string[];
+      articleCount: number;
+      quantitySummary: string;
+      status: ReceptionStatus;
+      batches: ReceptionBatch[];
+    }
+  >();
+
+  receptionBatches.forEach((batch) => {
+    const supplierName = batch.supplierName || "Fournisseur inconnu";
+    const dateLabel = formatDate(batch.receptionDate);
+    const key = `${normalizeSearchText(supplierName)}-${dateLabel}`;
+    const group = groups.get(key);
+
+    if (group) {
+      group.batches.push(batch);
+      group.batchNumbers.push(batch.batchNumber);
+      group.articleCount += batch.articleCount;
+      group.quantitySummary = summarizeReceptionGroupQuantities(group.batches);
+      group.status = group.status === "non_conforme" || batch.status === "non_conforme" ? "non_conforme" : "conforme";
+      return;
+    }
+
+    groups.set(key, {
+      key,
+      supplierName,
+      dateLabel,
+      batchNumbers: [batch.batchNumber],
+      articleCount: batch.articleCount,
+      quantitySummary: batch.quantitySummary,
+      status: batch.status,
+      batches: [batch],
+    });
+  });
+
+  return [...groups.values()];
+}
+
+function summarizeReceptionGroupQuantities(batches: ReceptionBatch[]) {
+  return [...new Set(batches.map((batch) => batch.quantitySummary).filter(Boolean))].join(" / ") || "--";
+}
+
+function parseReceptionObservationFields(observations: string | null) {
+  return String(observations ?? "")
+    .split(/\r?\n/)
+    .reduce(
+      (fields, line) => {
+        const trimmedLine = line.trim();
+        if (trimmedLine.toLowerCase().startsWith("bl:")) {
+          return { ...fields, deliveryNote: trimmedLine.slice(3).trim() };
+        }
+        if (trimmedLine.toLowerCase().startsWith("receptionne par:")) {
+          return { ...fields, receivedBy: trimmedLine.slice("receptionne par:".length).trim() };
+        }
+        return fields;
+      },
+      { deliveryNote: "", receivedBy: "" },
+    );
+}
+
 function ReceptionDetails({
+  editingBatches,
   suppliers,
   onBack,
   onReceptionSaved,
 }: {
+  editingBatches: ReceptionBatch[];
   suppliers: Supplier[];
   onBack: () => void;
   onReceptionSaved: (batchId: string) => Promise<void>;
 }) {
+  const primaryEditingBatch = editingBatches[0] ?? null;
+  const mergedEditingBatchIds = editingBatches.slice(1).map((batch) => batch.id);
+  const isEditingReception = Boolean(primaryEditingBatch);
+  const editingBatchKey = editingBatches.map((batch) => batch.id).join("|");
   const [receptionDate, setReceptionDate] = useState(todayInputValue);
   const receptionTime = "06:30";
   const [supplierId, setSupplierId] = useState(suppliers[0]?.id ?? "");
@@ -442,6 +760,68 @@ function ReceptionDetails({
 
   const selectedSupplier = suppliers.find((supplier) => supplier.id === supplierId) ?? null;
   const filteredCatalog = useMemo(() => filterProducts(supplierCatalog, catalogSearch), [catalogSearch, supplierCatalog]);
+
+  useEffect(() => {
+    if (!primaryEditingBatch) {
+      setReceptionDate(todayInputValue);
+      setSupplierId(suppliers[0]?.id || "");
+      setDeliveryNote("");
+      setReceivedBy("");
+      setLines([]);
+      setFocusedLineId("");
+      setSaveStatus("idle");
+      setMessage("");
+      return;
+    }
+
+    let cancelled = false;
+    async function loadReceptionForEdit() {
+      setSaveStatus("idle");
+      setMessage("");
+      setLines([]);
+      setFocusedLineId("");
+
+      try {
+        const groupLines = await Promise.all(editingBatches.map((batch) => fetchReceptionBatchLines(batch.id)));
+        if (cancelled) return;
+
+        const observationFields = parseReceptionObservationFields(primaryEditingBatch.observations);
+        setReceptionDate(toInputDateValue(new Date(primaryEditingBatch.receptionDate)));
+        setSupplierId(primaryEditingBatch.supplierId);
+        setDeliveryNote(observationFields.deliveryNote);
+        setReceivedBy(observationFields.receivedBy);
+        setLines(
+          groupLines.flat().map((line) => ({
+            localId: line.id,
+            lineId: line.id,
+            productId: line.productId,
+            productCode: line.productCode,
+            productName: line.productName,
+            unit: line.unit,
+            quantity: String(line.quantity),
+            supplierLot: line.supplierLot,
+            expiryDate: line.expiryDate ?? "",
+            transportTemperature: line.transportTemperatureC === null ? "" : String(line.transportTemperatureC),
+            temperatureStatus: line.temperatureStatus,
+            hygieneStatus: line.hygieneStatus,
+            observations: line.observations ?? "",
+          })),
+        );
+      } catch (error) {
+        console.error("Reception edit load failed", error);
+        if (!cancelled) {
+          setSaveStatus("error");
+          setMessage(formatApiError(error, "Impossible de charger la reception a modifier."));
+        }
+      }
+    }
+
+    void loadReceptionForEdit();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [editingBatchKey, primaryEditingBatch?.id, suppliers]);
 
   useEffect(() => {
     setSupplierId((current) => current || suppliers[0]?.id || "");
@@ -522,22 +902,31 @@ function ReceptionDetails({
 	        deliveryNote.trim() ? `BL: ${deliveryNote.trim()}` : "",
 	        receivedBy.trim() ? `Receptionne par: ${receivedBy.trim()}` : "",
 	      ].filter(Boolean);
-	      const batchId = await createReceptionBatch({
-	        supplierId,
-	        receptionDate: receptionTimestamp,
-	        observations: observationParts.length > 0 ? observationParts.join("\n") : null,
-	        lines: lines.map<ReceptionBatchLineInput>((line) => ({
-	          productId: line.productId,
-	          supplierLot: line.supplierLot,
-	          quantity: Number(line.quantity),
-	          unit: line.unit,
-	          expiryDate: line.expiryDate || null,
-	          transportTemperatureC: Number.isFinite(Number(line.transportTemperature)) ? Number(line.transportTemperature) : null,
-	          temperatureStatus: line.temperatureStatus,
-	          hygieneStatus: line.hygieneStatus,
-	          observations: line.observations || null,
+      const receptionInput = {
+        supplierId,
+        receptionDate: receptionTimestamp,
+        observations: observationParts.length > 0 ? observationParts.join("\n") : null,
+        lines: lines.map<ReceptionBatchLineInput>((line) => ({
+          id: line.lineId,
+          productId: line.productId,
+          supplierLot: line.supplierLot,
+          quantity: Number(line.quantity),
+          unit: line.unit,
+          expiryDate: line.expiryDate || null,
+          transportTemperatureC: Number.isFinite(Number(line.transportTemperature)) ? Number(line.transportTemperature) : null,
+          temperatureStatus: line.temperatureStatus,
+          hygieneStatus: line.hygieneStatus,
+          observations: line.observations || null,
         })),
-      });
+      };
+      const batchId =
+        isEditingReception && primaryEditingBatch
+          ? await updateReceptionBatch({
+              ...receptionInput,
+              batchId: primaryEditingBatch.id,
+              mergedBatchIds: mergedEditingBatchIds,
+            })
+          : await createReceptionBatch(receptionInput);
 
       await onReceptionSaved(batchId);
     } catch (error) {
@@ -591,14 +980,20 @@ function ReceptionDetails({
 	          <div className="reception-main-column">
 	            <AppCard className="reception-parameters-panel">
 	              <div className="reception-panel-title">
-	                <h2>Parametres de Reception</h2>
+	                <h2>{isEditingReception ? "Modifier Reception" : "Parametres de Reception"}</h2>
 	                <div className="reception-title-actions">
-	                  <span>N REC-{receptionDate.replace(/-/g, "")}-001</span>
+	                  <span>{primaryEditingBatch ? primaryEditingBatch.batchNumber : `N REC-${receptionDate.replace(/-/g, "")}-001`}</span>
 	                  <AppButton className="danger-link" onClick={onBack} type="button" variant="secondary">
 	                    Annuler
 	                  </AppButton>
 	                  <AppButton disabled={saveStatus === "saving"} type="submit">
-	                    {saveStatus === "saving" ? "Validation..." : "Valider la Reception"}
+	                    {saveStatus === "saving" ? (
+                        <TraceabilityLoader compact label={isEditingReception ? "Modification..." : "Validation..."} />
+                      ) : isEditingReception ? (
+                        "Modifier la Reception"
+                      ) : (
+                        "Valider la Reception"
+                      )}
 	                  </AppButton>
 	                </div>
 	              </div>
@@ -639,7 +1034,6 @@ function ReceptionDetails({
 	            </AppCard>
 	          </div>
 	        </section>
-
 	      </form>
 	    </main>
 	  );
@@ -649,48 +1043,160 @@ function ProductionModule({
   batches,
   products,
   selectedBatchId,
+  onProductionDeleted,
   onProductionSaved,
   onSelectBatch,
 }: {
   batches: ProductionBatch[];
   products: Product[];
   selectedBatchId: string;
+  onProductionDeleted: (batchIds: string[]) => Promise<void>;
   onProductionSaved: (batchId: string) => Promise<void>;
   onSelectBatch: (batchId: string) => void;
 }) {
+  type ProductionScreenMode = "overview" | "entry";
+  type ProductionDetailMode = "preview" | "schema";
+  type ProductionHistoryPanelMode = "history" | "detail";
+  type ProductionLotDraft = {
+    lots: AvailableLotOption[];
+    selectedLotIds: string[];
+    status: "loading" | "ready" | "error";
+  };
+
   const activeBlueprints = useMemo(
     () => products.filter((product) => product.type !== "raw" && product.recipeStatus === "active"),
     [products],
   );
-  const [productSearch, setProductSearch] = useState("");
+  const [screenMode, setScreenMode] = useState<ProductionScreenMode>("overview");
+  const [detailMode, setDetailMode] = useState<ProductionDetailMode>("preview");
+  const [historyPanelMode, setHistoryPanelMode] = useState<ProductionHistoryPanelMode>("history");
+  const [historyColumnFilters, setHistoryColumnFilters] = useState<ProductColumnFilter[]>([]);
+  const [recipeSearchTerm, setRecipeSearchTerm] = useState("");
+  const [openRecipeUsageProductId, setOpenRecipeUsageProductId] = useState<string | null>(null);
+  const [isHistorySelectionMode, setIsHistorySelectionMode] = useState(false);
+  const [selectedHistoryBatchIds, setSelectedHistoryBatchIds] = useState<string[]>([]);
+  const [workspaceBatchIds, setWorkspaceBatchIds] = useState<string[]>([]);
+  const [deleteHistoryCandidate, setDeleteHistoryCandidate] = useState<ProductionBatch[] | null>(null);
+  const [historyPdfCopyCount, setHistoryPdfCopyCount] = useState(1);
   const [selectedProductId, setSelectedProductId] = useState(activeBlueprints[0]?.id ?? "");
   const [productionDate, setProductionDate] = useState(todayInputValue);
   const [responsibleName, setResponsibleName] = useState("");
   const [operation, setOperation] = useState("");
   const [observations, setObservations] = useState("");
   const [componentDrafts, setComponentDrafts] = useState<ProductionComponentDraft[]>([]);
+  const [lotDraftsByProductId, setLotDraftsByProductId] = useState<Record<string, ProductionLotDraft>>({});
+  const [expandedComponentRows, setExpandedComponentRows] = useState<Record<string, boolean>>({});
+  const [expandedPreviewRows, setExpandedPreviewRows] = useState<Record<string, boolean>>({});
   const [componentStatus, setComponentStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [detailRows, setDetailRows] = useState<ProductionConsumptionDetail[]>([]);
   const [detailStatus, setDetailStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [schemaDiagram, setSchemaDiagram] = useState<ProductSchemaDiagram | null>(null);
+  const [schemaStatus, setSchemaStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [pdfStatus, setPdfStatus] = useState<"idle" | "exporting" | "success" | "error">("idle");
+  const [pdfMessage, setPdfMessage] = useState("");
+  const [historyPdfAlert, setHistoryPdfAlert] = useState<{ filePath: string; description: string } | null>(null);
+  const [historyActionStatus, setHistoryActionStatus] = useState<"idle" | "deleting" | "success" | "error">("idle");
+  const [historyActionMessage, setHistoryActionMessage] = useState("");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
 
   const selectedProduct = activeBlueprints.find((product) => product.id === selectedProductId) ?? null;
   const selectedBatch = batches.find((batch) => batch.id === selectedBatchId) ?? null;
   const generatedLot = useMemo(() => generateProductionLotNumber(selectedProduct, productionDate), [productionDate, selectedProduct]);
+  const hasExistingProductionForDate = useMemo(() => {
+    if (!selectedProduct || !productionDate) return false;
+    return batches.some(
+      (batch) =>
+        batch.productId === selectedProduct.id &&
+        batch.status === "validated" &&
+        toInputDateValue(new Date(batch.productionDate)) === productionDate,
+    );
+  }, [batches, productionDate, selectedProduct]);
+  const selectedBatchRows = detailRows;
+  const selectedBatchPreviewComponents = schemaDiagram?.components ?? emptyProductSchemaNodes;
+  const previewLotsByProductId = useMemo(() => groupProductionRowsByProductId(selectedBatchRows), [selectedBatchRows]);
+  const allSelectedComponents = useMemo(() => uniqueProductionSchemaNodes(componentDrafts.map((draft) => draft.component)), [componentDrafts]);
+  const historyBatches = useMemo(
+    () => [...batches].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()),
+    [batches],
+  );
+  const filteredBatches = useMemo(() => {
+    if (screenMode !== "overview") return historyBatches;
+    return historyBatches.filter((batch) => matchesProductionHistoryColumnFilters(batch, historyColumnFilters));
+  }, [historyBatches, historyColumnFilters, screenMode]);
+  const selectedHistoryBatches = useMemo(
+    () => batches.filter((batch) => selectedHistoryBatchIds.includes(batch.id) && batch.status === "validated"),
+    [batches, selectedHistoryBatchIds],
+  );
+  const workspaceBatches = useMemo(() => workspaceBatchIds.flatMap((batchId) => batches.find((batch) => batch.id === batchId) ?? []), [batches, workspaceBatchIds]);
+  const exportableWorkspaceBatches = useMemo(() => workspaceBatches.filter((batch) => batch.status === "validated"), [workspaceBatches]);
   const filteredBlueprints = useMemo(() => {
-    const query = productSearch.trim().toLowerCase();
+    const query = recipeSearchTerm.trim().toLowerCase();
     if (!query) return activeBlueprints;
-    return activeBlueprints.filter((product) => [product.name, product.code, categoryLabels[product.category ?? "boulangerie"] ?? ""].some((value) => value.toLowerCase().includes(query)));
-  }, [activeBlueprints, productSearch]);
+    return activeBlueprints.filter((product) =>
+      [product.name, product.code, categoryLabels[product.category ?? "boulangerie"] ?? "", typeLabels[product.type]].some((value) =>
+        value.toLowerCase().includes(query),
+      ),
+    );
+  }, [activeBlueprints, recipeSearchTerm]);
+  const recipeUsageByProductId = useMemo(() => {
+    return Object.fromEntries(
+      activeBlueprints
+        .filter((product) => product.type === "semi_finished")
+        .map((component) => [
+          component.id,
+          activeBlueprints.filter(
+            (candidate) =>
+              candidate.id !== component.id &&
+              candidate.componentNames.some((componentName) => normalizeSearchText(componentName) === normalizeSearchText(component.name)),
+          ),
+        ]),
+    );
+  }, [activeBlueprints]);
 
   useEffect(() => {
     setSelectedProductId((current) => (current && activeBlueprints.some((product) => product.id === current) ? current : activeBlueprints[0]?.id ?? ""));
   }, [activeBlueprints]);
 
   useEffect(() => {
-    if (!selectedProduct) {
+    if (openRecipeUsageProductId && !activeBlueprints.some((product) => product.id === openRecipeUsageProductId)) setOpenRecipeUsageProductId(null);
+  }, [activeBlueprints, openRecipeUsageProductId]);
+
+  useEffect(() => {
+    if (batches.length > 0 && (!selectedBatchId || !batches.some((batch) => batch.id === selectedBatchId))) onSelectBatch(batches[0].id);
+  }, [batches, onSelectBatch, selectedBatchId]);
+
+  useEffect(() => {
+    const existingValidatedIds = new Set(batches.filter((batch) => batch.status === "validated").map((batch) => batch.id));
+    setSelectedHistoryBatchIds((current) => current.filter((batchId) => existingValidatedIds.has(batchId)));
+  }, [batches]);
+
+  useEffect(() => {
+    const existingBatchIds = new Set(batches.map((batch) => batch.id));
+    setWorkspaceBatchIds((current) => current.filter((batchId) => existingBatchIds.has(batchId)));
+  }, [batches]);
+
+  useEffect(() => {
+    if (screenMode !== "overview") return;
+
+    function handleHistoryDeleteKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.defaultPrevented || deleteHistoryCandidate || historyActionStatus === "deleting") return;
+      if (!isDeleteKeyboardShortcut(event) || isEditableDeleteTarget(event.target)) return;
+      if (selectedHistoryBatches.length === 0) return;
+
+      event.preventDefault();
+      requestDeleteSelectedHistoryBatches();
+    }
+
+    document.addEventListener("keydown", handleHistoryDeleteKeyDown);
+    return () => document.removeEventListener("keydown", handleHistoryDeleteKeyDown);
+  }, [deleteHistoryCandidate, historyActionStatus, screenMode, selectedHistoryBatches]);
+
+  useEffect(() => {
+    if (screenMode !== "entry" || !selectedProduct) {
       setComponentDrafts([]);
+      setLotDraftsByProductId({});
+      setExpandedComponentRows({});
       setComponentStatus("idle");
       return;
     }
@@ -699,41 +1205,63 @@ function ProductionModule({
     let cancelled = false;
     async function loadComponents() {
       setComponentStatus("loading");
+      setComponentDrafts([]);
+      setLotDraftsByProductId({});
+      setExpandedComponentRows({});
+      setPdfStatus("idle");
+      setPdfMessage("");
+      setSaveStatus("idle");
       setMessage("");
       try {
         const components = await fetchProductSchema(product.id);
-        const drafts = await Promise.all(
-          components.map(async (component) => {
+        const allComponents = uniqueProductionSchemaNodes(components);
+        const lotEntries = await Promise.all(
+          allComponents.map(async (component) => {
             try {
               const lots = await fetchAvailableLotsForProduct(component.id, 3);
               return {
                 component,
-                lots,
-                selectedLotIds: lots[0] ? [lots[0].id] : [],
-                confirmed: false,
-                status: "ready" as const,
+                draft: {
+                  lots,
+                  selectedLotIds: lots[0] ? [lots[0].id] : [],
+                  status: "ready" as const,
+                },
               };
             } catch (error) {
               console.error("Production lot suggestions failed", error);
               return {
                 component,
-                lots: [],
-                selectedLotIds: [],
-                confirmed: false,
-                status: "error" as const,
+                draft: {
+                  lots: [],
+                  selectedLotIds: [],
+                  status: "error" as const,
+                },
               };
             }
           }),
         );
+        const nextLotDrafts = Object.fromEntries(lotEntries.map((entry) => [entry.component.id, entry.draft]));
 
         if (!cancelled) {
-          setComponentDrafts(drafts);
+          setComponentDrafts(
+            components.map((component) => ({
+              component,
+              lots: nextLotDrafts[component.id]?.lots ?? [],
+              selectedLotIds: nextLotDrafts[component.id]?.selectedLotIds ?? [],
+              confirmed: false,
+              status: nextLotDrafts[component.id]?.status ?? "ready",
+            })),
+          );
+          setLotDraftsByProductId(nextLotDrafts);
+          setExpandedComponentRows(buildDefaultExpandedProductionRows(components));
           setComponentStatus("ready");
         }
       } catch (error) {
         console.error("Production blueprint load failed", error);
         if (!cancelled) {
           setComponentDrafts([]);
+          setLotDraftsByProductId({});
+          setExpandedComponentRows({});
           setComponentStatus("error");
         }
       }
@@ -744,7 +1272,7 @@ function ProductionModule({
     return () => {
       cancelled = true;
     };
-  }, [selectedProduct?.id]);
+  }, [screenMode, selectedProduct?.id]);
 
   useEffect(() => {
     if (!selectedBatchId) {
@@ -756,6 +1284,7 @@ function ProductionModule({
     let cancelled = false;
     async function loadDetails() {
       setDetailStatus("loading");
+      setDetailRows([]);
       try {
         const rows = await fetchProductionConsumptionDetails(selectedBatchId);
         if (!cancelled) {
@@ -775,22 +1304,94 @@ function ProductionModule({
     };
   }, [selectedBatchId]);
 
-  function toggleComponentLot(componentId: string, lotId: string, checked: boolean) {
+  useEffect(() => {
+    if (!selectedBatch) {
+      setSchemaDiagram(null);
+      setSchemaStatus("idle");
+      return;
+    }
+
+    const batch = selectedBatch;
+    let cancelled = false;
+    async function loadSchemaDiagram() {
+      setSchemaStatus("loading");
+      setSchemaDiagram(null);
+      try {
+        const diagram = await fetchProductSchemaDiagram(batch.productId);
+        if (!cancelled) {
+          setSchemaDiagram(diagram);
+          setSchemaStatus("idle");
+        }
+      } catch (error) {
+        console.error("Production schema diagram load failed", error);
+        if (!cancelled) {
+          setSchemaDiagram(null);
+          setSchemaStatus("error");
+        }
+      }
+    }
+
+    void loadSchemaDiagram();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedBatch?.id, selectedBatch?.productId]);
+
+  useEffect(() => {
+    setExpandedPreviewRows(buildDefaultExpandedProductionRows(selectedBatchPreviewComponents));
+  }, [selectedBatch?.id, selectedBatchPreviewComponents]);
+
+  function selectComponentLot(componentId: string, lotId: string) {
+    setLotDraftsByProductId((current) => ({
+      ...current,
+      [componentId]: {
+        ...(current[componentId] ?? { lots: [], status: "ready" as const }),
+        selectedLotIds: lotId ? [lotId] : [],
+      },
+    }));
     setComponentDrafts((current) =>
-      current.map((draft) => {
-        if (draft.component.id !== componentId) return draft;
-        const nextSelected = checked ? [...new Set([...draft.selectedLotIds, lotId])] : draft.selectedLotIds.filter((id) => id !== lotId);
-        return { ...draft, selectedLotIds: nextSelected, confirmed: false };
-      }),
+      current.map((draft) => (draft.component.id === componentId ? { ...draft, selectedLotIds: lotId ? [lotId] : [], confirmed: false } : draft)),
     );
     setSaveStatus("idle");
     setMessage("");
+    setPdfStatus("idle");
+    setPdfMessage("");
   }
 
-  function confirmComponentLots(componentId: string) {
-    setComponentDrafts((current) =>
-      current.map((draft) => (draft.component.id === componentId ? { ...draft, confirmed: draft.selectedLotIds.length > 0 } : draft)),
-    );
+  function updateProductionDate(value: string) {
+    setProductionDate(value);
+    setSaveStatus("idle");
+    setMessage("");
+    setPdfStatus("idle");
+    setPdfMessage("");
+  }
+
+  function updateResponsibleName(value: string) {
+    setResponsibleName(value);
+    setSaveStatus("idle");
+    setMessage("");
+    setPdfStatus("idle");
+    setPdfMessage("");
+  }
+
+  function navigateToProductionComponent(component: ProductSchemaNode) {
+    if (component.type !== "semi_finished") return;
+
+    setSelectedProductId(component.id);
+    setRecipeSearchTerm(component.name);
+    setOpenRecipeUsageProductId(null);
+    setSaveStatus("idle");
+    setMessage("");
+    setPdfStatus("idle");
+    setPdfMessage("");
+  }
+
+  function startNewProduction() {
+    setScreenMode("entry");
+    setRecipeSearchTerm("");
+    setPdfStatus("idle");
+    setPdfMessage("");
     setSaveStatus("idle");
     setMessage("");
   }
@@ -814,17 +1415,11 @@ function ProductionModule({
       return;
     }
 
-    const missingComponent = componentDrafts.find((draft) => draft.selectedLotIds.length === 0);
+    const traceableComponents = allSelectedComponents.filter((component) => !isWaterComponent(component));
+    const missingComponent = traceableComponents.find((component) => (lotDraftsByProductId[component.id]?.selectedLotIds.length ?? 0) === 0);
     if (missingComponent) {
       setSaveStatus("error");
-      setMessage(`Confirmez un lot pour ${missingComponent.component.name}.`);
-      return;
-    }
-
-    const unconfirmedComponent = componentDrafts.find((draft) => !draft.confirmed);
-    if (unconfirmedComponent) {
-      setSaveStatus("error");
-      setMessage(`Validez le choix du lot pour ${unconfirmedComponent.component.name}.`);
+      setMessage(`Selectionnez un lot pour ${missingComponent.name}.`);
       return;
     }
 
@@ -838,12 +1433,13 @@ function ProductionModule({
         responsibleName: responsibleName.trim() || null,
         operation: operation.trim() || null,
         observations: observations.trim() || null,
-        consumedLotIds: [...new Set(componentDrafts.flatMap((draft) => draft.selectedLotIds))],
+        consumedLotIds: [...new Set(traceableComponents.flatMap((component) => lotDraftsByProductId[component.id]?.selectedLotIds ?? []))],
       });
 
       setSaveStatus("success");
       setMessage("Production validee.");
       await onProductionSaved(batchId);
+      onSelectBatch(batchId);
     } catch (error) {
       console.error("Production save failed", error);
       setSaveStatus("error");
@@ -851,44 +1447,406 @@ function ProductionModule({
     }
   }
 
+  async function handleExportProductionPdf() {
+    if (!selectedProduct) {
+      setPdfStatus("error");
+      setPdfMessage("Selectionnez un produit a exporter.");
+      return;
+    }
+
+    if (!generatedLot) {
+      setPdfStatus("error");
+      setPdfMessage("Impossible de generer le lot: categorie ou codification manquante.");
+      return;
+    }
+
+    if (componentStatus !== "ready" || componentDrafts.length === 0) {
+      setPdfStatus("error");
+      setPdfMessage("Le schema actif ne contient aucun composant a exporter.");
+      return;
+    }
+
+    setPdfStatus("exporting");
+    setPdfMessage("");
+    try {
+      const result = await downloadProductionTraceabilityPdf(
+        buildProductionPdfData({
+          categoryLabel: formatCategory(selectedProduct.category),
+          componentDrafts,
+          nestedLotDrafts: lotDraftsByProductId,
+          product: selectedProduct,
+          productLot: generatedLot,
+          productionDate,
+          responsibleName: responsibleName.trim() || null,
+        }),
+      );
+      const location = "filePath" in result ? result.filePath : "telechargement lance";
+      setPdfStatus("success");
+      setPdfMessage(`PDF exporte: ${location}`);
+    } catch (error) {
+      console.error("Production PDF export failed", error);
+      setPdfStatus("error");
+      setPdfMessage(formatApiError(error, "Impossible d'exporter le PDF."));
+    }
+  }
+
+  async function handleExportSelectedProductionPdfs() {
+    if (exportableWorkspaceBatches.length === 0) {
+      setPdfStatus("error");
+      setPdfMessage("Ajoutez au moins une production validee au workspace.");
+      setHistoryPdfAlert(null);
+      return;
+    }
+
+    setPdfStatus("exporting");
+    setPdfMessage("");
+    setHistoryPdfAlert(null);
+    try {
+      const pdfItems = await Promise.all(
+        exportableWorkspaceBatches.map(async (batch) => {
+          const [rows, schema] = await Promise.all([fetchProductionConsumptionDetails(batch.id), fetchProductSchema(batch.productId)]);
+          return schema.length > 0 ? buildProductionPdfDataFromBatchSchema({ batch, components: schema, rows }) : buildProductionPdfDataFromBatch({ batch, rows });
+        }),
+      );
+      const repeatedPdfItems = pdfItems.flatMap((item) => Array.from({ length: historyPdfCopyCount }, () => item));
+      const result = await downloadProductionTraceabilityBatchPdf(repeatedPdfItems);
+      const exportedFilePath = "filePath" in result && typeof result.filePath === "string" ? result.filePath : "";
+      const location = exportedFilePath || "telechargement lance";
+      setPdfStatus("success");
+      if (exportedFilePath) {
+        setPdfMessage("");
+        setHistoryPdfAlert({
+          filePath: exportedFilePath,
+          description: `PDF groupe exporte: ${location}`,
+        });
+      } else {
+        setPdfMessage(`PDF groupe exporte: ${location}`);
+      }
+    } catch (error) {
+      console.error("Grouped production PDF export failed", error);
+      setPdfStatus("error");
+      setPdfMessage(formatApiError(error, "Impossible d'exporter le PDF groupe."));
+      setHistoryPdfAlert(null);
+    }
+  }
+
+  async function handleOpenHistoryPdfAlert() {
+    if (!historyPdfAlert) return;
+
+    try {
+      await openProductionPdfFile(historyPdfAlert.filePath);
+    } catch (error) {
+      console.error("Open production PDF failed", error);
+      setPdfStatus("error");
+      setPdfMessage(formatApiError(error, "Impossible d'ouvrir le PDF."));
+    }
+  }
+
+  function addBatchToWorkspace(batch: ProductionBatch) {
+    setPdfStatus("idle");
+    setPdfMessage("");
+    setHistoryPdfAlert(null);
+    setWorkspaceBatchIds((current) => (current.includes(batch.id) ? current : [...current, batch.id]));
+  }
+
+  function removeBatchFromWorkspace(batchId: string) {
+    setPdfStatus("idle");
+    setPdfMessage("");
+    setHistoryPdfAlert(null);
+    setWorkspaceBatchIds((current) => current.filter((currentBatchId) => currentBatchId !== batchId));
+  }
+
+  function openProductionHistoryDetail(batchId: string) {
+    onSelectBatch(batchId);
+    setDetailMode("preview");
+    setHistoryPanelMode("detail");
+  }
+
+  function toggleHistoryBatchSelection(batch: ProductionBatch, checked: boolean) {
+    if (batch.status !== "validated") return;
+    setHistoryActionStatus("idle");
+    setHistoryActionMessage("");
+    setSelectedHistoryBatchIds((current) => {
+      if (!checked) return current.filter((batchId) => batchId !== batch.id);
+      return current.includes(batch.id) ? current : [...current, batch.id];
+    });
+  }
+
+  function toggleHistorySelectionMode() {
+    setHistoryActionStatus("idle");
+    setHistoryActionMessage("");
+    setIsHistorySelectionMode((current) => {
+      if (current) setSelectedHistoryBatchIds([]);
+      return !current;
+    });
+  }
+
+  function requestDeleteSelectedHistoryBatches() {
+    if (selectedHistoryBatches.length === 0) return;
+    setDeleteHistoryCandidate(selectedHistoryBatches);
+    setHistoryActionStatus("idle");
+    setHistoryActionMessage("");
+  }
+
+  async function confirmDeleteSelectedHistoryBatches() {
+    if (!deleteHistoryCandidate || deleteHistoryCandidate.length === 0) return;
+
+    const batchIds = deleteHistoryCandidate.map((batch) => batch.id);
+    setHistoryActionStatus("deleting");
+    setHistoryActionMessage("");
+
+    try {
+      await deleteProductionBatches(batchIds);
+      setDeleteHistoryCandidate(null);
+      setSelectedHistoryBatchIds((current) => current.filter((batchId) => !batchIds.includes(batchId)));
+      setWorkspaceBatchIds((current) => current.filter((batchId) => !batchIds.includes(batchId)));
+      await onProductionDeleted(batchIds);
+      setHistoryActionStatus("success");
+      setHistoryActionMessage(batchIds.length === 1 ? "Production supprimee." : `${batchIds.length} productions supprimees.`);
+    } catch (error) {
+      console.error("Production history delete failed", error);
+      setHistoryActionStatus("error");
+      setHistoryActionMessage(formatApiError(error, "Impossible de supprimer la production selectionnee."));
+    }
+  }
+
+  function updateHistoryPdfCopyCount(value: string) {
+    const nextValue = Number.parseInt(value, 10);
+    setHistoryPdfCopyCount(Number.isFinite(nextValue) ? Math.min(12, Math.max(1, nextValue)) : 1);
+  }
+
+  if (screenMode === "entry") {
+    return (
+      <main className="production-workspace">
+        <AppCardAside className="production-catalog-panel">
+          <div className="production-catalog-header">
+            <h2>Catalogue des recettes</h2>
+            <AppIcon name="columns" />
+          </div>
+          <div className="production-search-row">
+            <input autoComplete="off" placeholder="Rechercher recette, produit..." value={recipeSearchTerm} onChange={(event) => setRecipeSearchTerm(event.target.value)} />
+          </div>
+          <div className="production-recipe-list">
+            {filteredBlueprints.length === 0 ? <EmptyState compact>Aucun schema actif.</EmptyState> : null}
+            {filteredBlueprints.map((product) => {
+              const linkedProducts = recipeUsageByProductId[product.id] ?? [];
+              const isUsageOpen = openRecipeUsageProductId === product.id;
+
+              return (
+                <div
+                  className={cx("production-recipe-card", product.id === selectedProductId && "selected")}
+                  key={product.id}
+                  onClick={() => {
+                    setSelectedProductId(product.id);
+                    setOpenRecipeUsageProductId(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    setSelectedProductId(product.id);
+                    setOpenRecipeUsageProductId(null);
+                  }}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="production-recipe-card-header">
+                    <strong>{product.name}</strong>
+                    <span className="production-recipe-card-actions">
+                      {product.type === "semi_finished" ? (
+                        <button
+                          aria-expanded={isUsageOpen}
+                          aria-label={`Voir les produits qui utilisent ${product.name}`}
+                          className="production-recipe-usage-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setOpenRecipeUsageProductId((current) => (current === product.id ? null : product.id));
+                          }}
+                          type="button"
+                        >
+                          <AppIcon name="search" />
+                        </button>
+                      ) : null}
+                      <span className="production-active-pill">Actif</span>
+                    </span>
+                  </div>
+                  <div className="production-recipe-card-meta">
+                    <ProductTypeBadge type={product.type} />
+                    <span>{formatCategory(product.category)}</span>
+                    <span>{product.componentCount} comp.</span>
+                  </div>
+                  {isUsageOpen ? (
+                    <div className="production-recipe-usage-popover" onClick={(event) => event.stopPropagation()}>
+                      {linkedProducts.length === 0 ? (
+                        <p>Aucun produit actif n'utilise ce semi-fini.</p>
+                      ) : (
+                        linkedProducts.map((linkedProduct) => (
+                          <button
+                            key={linkedProduct.id}
+                            onClick={() => {
+                              setSelectedProductId(linkedProduct.id);
+                              setOpenRecipeUsageProductId(null);
+                            }}
+                            type="button"
+                          >
+                            <strong>{linkedProduct.name}</strong>
+                            <span>
+                              {typeLabels[linkedProduct.type]} · {formatCategory(linkedProduct.category)}
+                            </span>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </AppCardAside>
+
+        <section className="production-main-column">
+          <AppCard className="production-entry-panel">
+            <div className="production-entry-header">
+              <div>
+                <h2>{selectedProduct?.name ?? "Produit"}</h2>
+                <p>{generatedLot || "Lot non genere"}</p>
+              </div>
+              <div className="production-date-control">
+                <span>Date de production</span>
+                <AppDatePicker value={productionDate} onChange={updateProductionDate} />
+              </div>
+              <label className="production-responsible-control">
+                <span>Fabrique par</span>
+                <input
+                  autoComplete="off"
+                  onChange={(event) => updateResponsibleName(event.target.value)}
+                  placeholder="Nom facultatif"
+                  value={responsibleName}
+                />
+              </label>
+              <div className="production-entry-actions">
+                <AppButton onClick={() => setScreenMode("overview")} type="button" variant="secondary">
+                  Retour
+                </AppButton>
+                <span className="production-confirm-action-wrap">
+                  {hasExistingProductionForDate ? (
+                    <span
+                      aria-label="Production deja confirmee pour cette date"
+                      className="production-existing-confirmation-dot"
+                      title="Production deja confirmee pour cette date"
+                    />
+                  ) : null}
+                  <AppButton disabled={saveStatus === "saving" || componentStatus === "loading"} onClick={() => void handleValidateProduction()} type="button">
+                    {saveStatus === "saving" ? <TraceabilityLoader compact label="Validation..." /> : "Confirmer les lots"}
+                  </AppButton>
+                </span>
+              </div>
+            </div>
+
+            <div className="table-wrap production-component-table">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Composant</th>
+                    <th>Type</th>
+                    <th>Lot</th>
+                    <th>Source/Fournisseur</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {componentStatus === "loading" ? (
+                    <TableEmpty colSpan={4}>
+                      <TraceabilityLoader label="Chargement du schema..." />
+                    </TableEmpty>
+                  ) : null}
+                  {componentStatus === "error" ? <TableEmpty colSpan={4}>Impossible de charger le schema.</TableEmpty> : null}
+                  {componentStatus === "ready" && componentDrafts.length === 0 ? <TableEmpty colSpan={4}>Aucun composant dans ce schema.</TableEmpty> : null}
+                  {orderProductionComponentDrafts(componentDrafts).flatMap((draft, index) =>
+                    renderProductionComponentRows({
+                      depth: 0,
+                      expandedComponentRows,
+                      lotDraftsByProductId,
+                      node: draft.component,
+                      onLotChange: selectComponentLot,
+                      onNavigateToComponent: navigateToProductionComponent,
+                      rowKey: `${draft.component.id}:${index}`,
+                      onToggleExpand: (rowKey) => setExpandedComponentRows((current) => ({ ...current, [rowKey]: !current[rowKey] })),
+                    }),
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {message ? <p className={cx("save-message", saveStatus === "error" ? "error" : "success")}>{message}</p> : null}
+            {pdfMessage ? <p className={cx("save-message", pdfStatus === "error" ? "error" : "success")}>{pdfMessage}</p> : null}
+          </AppCard>
+        </section>
+      </main>
+    );
+  }
+
   return (
-    <main className="production-workspace">
-      <AppCardAside className="production-catalog-panel">
-        <div className="table-toolbar">
-          <div className="panel-title no-border">
-            <span className="panel-icon">BP</span>
+    <>
+    <main className="production-overview-workspace">
+      <AppCardAside className="production-overview-history production-workspace-panel">
+        <div className="production-overview-history-header">
+          <div className="production-overview-history-titlebar">
             <div>
-              <h2>Blueprints actifs</h2>
-              <p>{activeBlueprints.length} schema(s)</p>
+              <h2>Workspace production</h2>
+              <p>{workspaceBatches.length} production(s)</p>
             </div>
           </div>
+          <div className="production-overview-history-actions">
+            <label className="production-pdf-copy-control">
+              <span>Copies</span>
+              <input
+                aria-label="Nombre de copies PDF par production dans le workspace"
+                max={12}
+                min={1}
+                onChange={(event) => updateHistoryPdfCopyCount(event.target.value)}
+                type="number"
+                value={historyPdfCopyCount}
+              />
+            </label>
+            <AppButton compact disabled={pdfStatus === "exporting" || exportableWorkspaceBatches.length === 0} onClick={() => void handleExportSelectedProductionPdfs()} type="button" variant="secondary">
+              <AppIcon name="file" />
+              {pdfStatus === "exporting" ? <TraceabilityLoader compact label="Export..." /> : "Exporter PDF"}
+            </AppButton>
+          </div>
         </div>
-        <div className="production-search-row">
-          <input autoComplete="off" placeholder="Filtrer les produits..." value={productSearch} onChange={(event) => setProductSearch(event.target.value)} />
-        </div>
-        <div className="table-wrap production-product-list">
+        {pdfMessage && screenMode === "overview" ? <p className={cx("save-message production-overview-export-message", pdfStatus === "error" ? "error" : "success")}>{pdfMessage}</p> : null}
+        <div className="table-wrap production-overview-history-table production-workspace-table">
           <table className="data-table">
             <thead>
               <tr>
                 <th>Produit</th>
-                <th>Type</th>
+                <th>Lot</th>
+                <th>Production</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
-              {filteredBlueprints.length === 0 ? <TableEmpty colSpan={2}>Aucun schema actif.</TableEmpty> : null}
-              {filteredBlueprints.map((product) => (
-                <tr
-                  className={cx(product.id === selectedProductId && "selected-row")}
-                  key={product.id}
-                  onClick={() => setSelectedProductId(product.id)}
-                  onDoubleClick={() => setSelectedProductId(product.id)}
-                >
+              {workspaceBatches.length === 0 ? <TableEmpty colSpan={4}>Double-cliquez une production dans l'historique pour l'ajouter ici.</TableEmpty> : null}
+              {workspaceBatches.map((batch) => (
+                <tr className={cx(batch.id === selectedBatchId && "selected-row")} key={batch.id} onClick={() => onSelectBatch(batch.id)}>
+                  <td>{batch.productName}</td>
                   <td>
-                    <strong>{product.name}</strong>
-                    <span className="muted-cell">{product.code}</span>
+                    <strong>{batch.generatedLot}</strong>
                   </td>
-                  <td>
-                    <ProductTypeBadge type={product.type} />
+                  <td className="production-history-date-cell">
+                    <strong>{formatDate(batch.productionDate)}</strong>
+                    <span>Conf. {formatDateTime(batch.createdAt)}</span>
+                  </td>
+                  <td className="production-row-action-cell">
+                    <button
+                      aria-label={`Retirer ${batch.generatedLot} du workspace`}
+                      className="production-row-action-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        removeBatchFromWorkspace(batch.id);
+                      }}
+                      type="button"
+                    >
+                      <AppIcon name="x" />
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -897,159 +1855,545 @@ function ProductionModule({
         </div>
       </AppCardAside>
 
-      <section className="production-main-column">
-        <AppCard className="production-entry-panel">
-          <div className="reception-panel-title">
-            <h2>Production du jour</h2>
-            <div className="reception-title-actions">
-              <span>{generatedLot || "Lot non genere"}</span>
-              <AppButton disabled={saveStatus === "saving" || componentStatus === "loading"} onClick={() => void handleValidateProduction()} type="button">
-                {saveStatus === "saving" ? "Validation..." : "Valider la production"}
-              </AppButton>
-            </div>
-          </div>
-          <div className="production-form-grid">
-            <Field label="Date de production">
-              <AppDatePicker value={productionDate} onChange={setProductionDate} />
-            </Field>
-            <Field label="Produit">
-              <input readOnly value={selectedProduct?.name ?? ""} />
-            </Field>
-            <Field label="Responsable">
-              <input value={responsibleName} onChange={(event) => setResponsibleName(event.target.value)} />
-            </Field>
-            <Field label="Operation">
-              <input value={operation} onChange={(event) => setOperation(event.target.value)} />
-            </Field>
-            <Field label="Observations" wide>
-              <input value={observations} onChange={(event) => setObservations(event.target.value)} />
-            </Field>
-          </div>
-          <div className="production-component-list">
-            {componentStatus === "loading" ? <EmptyState compact>Chargement du schema...</EmptyState> : null}
-            {componentStatus === "error" ? <EmptyState compact>Impossible de charger le schema.</EmptyState> : null}
-            {componentStatus === "ready" && componentDrafts.length === 0 ? <EmptyState compact>Aucun composant dans ce schema.</EmptyState> : null}
-            {componentDrafts.map((draft) => (
-              <div className="production-component-row" key={draft.component.id}>
+      <AppCard className="production-overview-detail production-history-browser">
+        <div className={cx("production-history-slider", historyPanelMode === "detail" && "show-detail")}>
+          <section className="production-history-slide">
+            <div className="production-overview-history-header">
+              <div className="production-overview-history-titlebar">
                 <div>
-                  <strong>{draft.component.name}</strong>
-                  <span>{typeLabels[draft.component.type]}</span>
+                  <h2>Historique de production</h2>
+                  <p>{filteredBatches.length} production(s)</p>
                 </div>
-                <div className="production-lot-options">
-                  {draft.status === "error" ? <span className="production-lot-empty">Erreur lots</span> : null}
-                  {draft.status !== "error" && draft.lots.length === 0 ? <span className="production-lot-empty">Aucun lot disponible</span> : null}
-                  {draft.lots.map((lot) => (
-                    <label className="production-lot-chip" key={lot.id}>
-                      <input
-                        checked={draft.selectedLotIds.includes(lot.id)}
-                        onChange={(event) => toggleComponentLot(draft.component.id, lot.id, event.target.checked)}
-                        type="checkbox"
-                      />
-                      <span>
-                        <strong>{lot.lotNumber}</strong>
-                        <small>
-                          {formatDateTime(lot.createdAt)}
-                          {lot.supplierLot ? ` · ${lot.supplierLot}` : ""}
-                        </small>
-                      </span>
-                    </label>
-                  ))}
-                  <button
-                    className={cx("production-confirm-lots", draft.confirmed && "confirmed")}
-                    disabled={draft.selectedLotIds.length === 0}
-                    onClick={() => confirmComponentLots(draft.component.id)}
+                <AppButton compact onClick={startNewProduction} type="button">
+                  <AppIcon name="plus" />
+                  Nouveau Produit
+                </AppButton>
+              </div>
+              <div className="production-overview-history-toolbar">
+                <ProductColumnFilterBar
+                  dateHelperColumns={["productionDate", "confirmedAt"]}
+                  filters={historyColumnFilters}
+                  options={productionHistoryColumnFilterOptions}
+                  placeholder="Filter by produit, categorie, lot..."
+                  valueSuggestions={productionHistoryColumnValueSuggestions}
+                  onFiltersChange={setHistoryColumnFilters}
+                />
+                <div className="production-overview-history-actions">
+                  <AppButton
+                    aria-label={isHistorySelectionMode ? "Masquer la selection" : "Afficher la selection"}
+                    compact
+                    onClick={toggleHistorySelectionMode}
+                    title={isHistorySelectionMode ? "Masquer la selection" : "Selectionner des productions"}
                     type="button"
+                    variant={isHistorySelectionMode ? "primary" : "secondary"}
                   >
-                    {draft.confirmed ? "Lot confirme" : "Confirmer"}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          {message ? <p className={cx("save-message", saveStatus === "error" ? "error" : "success")}>{message}</p> : null}
-        </AppCard>
-
-        <div className="production-bottom-grid">
-          <AppCard className="production-history-panel">
-            <div className="table-toolbar">
-              <div className="panel-title no-border">
-                <span className="panel-icon">HP</span>
-                <div>
-                  <h2>Historique production</h2>
-                  <p>{batches.length} lot(s)</p>
+                    <AppIcon name="check" />
+                  </AppButton>
                 </div>
               </div>
             </div>
-            <div className="table-wrap production-history-table">
+            {historyActionMessage && screenMode === "overview" ? (
+              <p className={cx("save-message production-overview-export-message", historyActionStatus === "error" ? "error" : "success")}>{historyActionMessage}</p>
+            ) : null}
+            <div className="table-wrap production-overview-history-table production-history-browser-table">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Date</th>
+                    {isHistorySelectionMode ? <th className="select-column"></th> : null}
                     <th>Produit</th>
-                    <th>Lot produit</th>
-                    <th>Lots utilises</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {batches.length === 0 ? <TableEmpty colSpan={4}>Aucune production enregistree.</TableEmpty> : null}
-                  {batches.map((batch) => (
-                    <tr className={cx(batch.id === selectedBatchId && "selected-row")} key={batch.id} onClick={() => onSelectBatch(batch.id)}>
-                      <td>{formatDateTime(batch.productionDate)}</td>
-                      <td>
-                        <strong>{batch.productName}</strong>
-                        <span className="muted-cell">{typeLabels[batch.productType]}</span>
-                      </td>
-                      <td>{batch.generatedLot}</td>
-                      <td>{batch.consumedLotCount}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </AppCard>
-
-          <AppCard className="production-history-panel">
-            <div className="table-toolbar">
-              <div className="panel-title no-border">
-                <span className="panel-icon">TR</span>
-                <div>
-                  <h2>Lots utilises</h2>
-                  <p>{selectedBatch ? selectedBatch.generatedLot : "Aucun lot selectionne"}</p>
-                </div>
-              </div>
-            </div>
-            <div className="table-wrap production-consumption-table">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Composant</th>
+                    <th>Type</th>
+                    <th>Categorie</th>
                     <th>Lot</th>
-                    <th>Source</th>
-                    <th>Date sauvegarde</th>
+                    <th>Production</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {detailStatus === "loading" ? <TableEmpty colSpan={4}>Chargement...</TableEmpty> : null}
-                  {detailStatus === "error" ? <TableEmpty colSpan={4}>Impossible de charger les lots.</TableEmpty> : null}
-                  {detailStatus === "idle" && detailRows.length === 0 ? <TableEmpty colSpan={4}>Aucun lot utilise.</TableEmpty> : null}
-                  {detailRows.map((row) => (
-                    <tr key={row.id}>
+                  {filteredBatches.length === 0 ? <TableEmpty colSpan={isHistorySelectionMode ? 7 : 6}>Aucune production enregistree.</TableEmpty> : null}
+                  {filteredBatches.map((batch) => (
+                    <tr
+                      className={cx(batch.id === selectedBatchId && "selected-row")}
+                      key={batch.id}
+                      onClick={() => onSelectBatch(batch.id)}
+                      onDoubleClick={() => addBatchToWorkspace(batch)}
+                    >
+                      {isHistorySelectionMode ? (
+                        <td className="select-column" onClick={(event) => event.stopPropagation()}>
+                          <label className="table-checkbox">
+                            <input
+                              aria-label={`Selectionner ${batch.generatedLot}`}
+                              checked={selectedHistoryBatchIds.includes(batch.id)}
+                              disabled={batch.status !== "validated"}
+                              onChange={(event) => toggleHistoryBatchSelection(batch, event.target.checked)}
+                              type="checkbox"
+                            />
+                            <span></span>
+                          </label>
+                        </td>
+                      ) : null}
+                      <td>{batch.productName}</td>
                       <td>
-                        <strong>{row.productName}</strong>
-                        <span className="muted-cell">{typeLabels[row.productType]}</span>
+                        <ProductTypeBadge type={batch.productType} />
                       </td>
-                      <td>{row.lotNumber}</td>
-                      <td>{row.sourceType === "reception" ? "Reception" : "Production"}</td>
-                      <td>{formatDateTime(row.lotCreatedAt)}</td>
+                      <td>{formatCategory(batch.category)}</td>
+                      <td>
+                        <div className="production-history-lot-cell">
+                          <strong>{batch.generatedLot}</strong>
+                        </div>
+                      </td>
+                      <td className="production-history-date-cell">
+                        <strong>{formatDate(batch.productionDate)}</strong>
+                        <span>Conf. {formatDateTime(batch.createdAt)}</span>
+                      </td>
+                      <td className="production-row-action-cell">
+                        <button
+                          aria-label={`Ouvrir le detail de ${batch.generatedLot}`}
+                          className="production-row-action-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openProductionHistoryDetail(batch.id);
+                          }}
+                          type="button"
+                        >
+                          <AppIcon name="chevronRight" />
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </AppCard>
+          </section>
+
+          <section className="production-history-slide production-history-detail-slide">
+            {selectedBatch ? (
+              <>
+                <div className="production-history-detail-header">
+                  <div>
+                    <h2>{selectedBatch.productName}</h2>
+                    <p>{selectedBatch.generatedLot}</p>
+                  </div>
+                  <div className="production-detail-floating-actions">
+                    <AppButton compact onClick={() => setHistoryPanelMode("history")} type="button" variant="secondary">
+                      <AppIcon name="chevronLeft" />
+                      Retour
+                    </AppButton>
+                    <div className="production-detail-tabs" role="tablist">
+                      <button className={cx(detailMode === "preview" && "active")} onClick={() => setDetailMode("preview")} type="button">
+                        <AppWindowIcon />
+                        Preview
+                      </button>
+                      <button className={cx(detailMode === "schema" && "active")} onClick={() => setDetailMode("schema")} type="button">
+                        <CodeIcon />
+                        Schema
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {detailMode === "preview" ? (
+                  <div className="table-wrap production-overview-components-table">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Composant</th>
+                          <th>Type</th>
+                          <th>Lot</th>
+                          <th>Source/Fournisseur</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detailStatus === "loading" || schemaStatus === "loading" ? (
+                          <TableEmpty colSpan={4}>
+                            <TraceabilityLoader label="Chargement..." />
+                          </TableEmpty>
+                        ) : null}
+                        {detailStatus === "error" ? <TableEmpty colSpan={4}>Impossible de charger les lots.</TableEmpty> : null}
+                        {detailStatus === "idle" && schemaStatus !== "loading" && selectedBatchPreviewComponents.length === 0 && selectedBatchRows.length === 0 ? (
+                          <TableEmpty colSpan={4}>Aucun lot utilise.</TableEmpty>
+                        ) : null}
+                        {detailStatus === "idle" && schemaStatus !== "loading" && selectedBatchPreviewComponents.length > 0
+                          ? orderProductionSchemaNodes(selectedBatchPreviewComponents).flatMap((component, index) =>
+                              renderProductionPreviewRows({
+                                depth: 0,
+                                expandedPreviewRows,
+                                lotsByProductId: previewLotsByProductId,
+                                node: component,
+                                onToggleExpand: (rowKey) => setExpandedPreviewRows((current) => ({ ...current, [rowKey]: !current[rowKey] })),
+                                rowKey: `${component.id}:${index}`,
+                              }),
+                            )
+                          : null}
+                        {detailStatus === "idle" && schemaStatus === "error" && selectedBatchPreviewComponents.length === 0
+                          ? selectedBatchRows.map((row) => (
+                              <tr key={row.id}>
+                                <td>
+                                  <strong>{row.productName}</strong>
+                                </td>
+                                <td>
+                                  <ProductTypeBadge type={row.productType} />
+                                </td>
+                                <td>{renderLotText(row.supplierLot || row.lotNumber, row.lotCreatedAt)}</td>
+                                <td>{row.sourceType === "reception" ? "Reception" : "Production interne"}</td>
+                              </tr>
+                            ))
+                          : null}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="production-schema-panel">
+                    <ProductionTraceabilityDiagram batch={selectedBatch} rows={selectedBatchRows} schema={schemaDiagram} status={schemaStatus} />
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="production-overview-empty">
+                <EmptyState large>Aucune production selectionnee.</EmptyState>
+              </div>
+            )}
+          </section>
         </div>
-      </section>
+      </AppCard>
     </main>
+    {deleteHistoryCandidate ? (
+      <ProductionHistoryDeleteDialog
+        batches={deleteHistoryCandidate}
+        isDeleting={historyActionStatus === "deleting"}
+        onCancel={() => {
+          if (historyActionStatus !== "deleting") setDeleteHistoryCandidate(null);
+        }}
+        onConfirm={() => void confirmDeleteSelectedHistoryBatches()}
+      />
+    ) : null}
+    {historyPdfAlert ? (
+      <div aria-live="polite" className="production-pdf-alert" role="status">
+        <div className="production-pdf-alert-content">
+          <strong>PDF exporte</strong>
+          <p>{historyPdfAlert.description}</p>
+        </div>
+        <AppButton compact onClick={() => void handleOpenHistoryPdfAlert()} type="button">
+          Open
+        </AppButton>
+        <AppButton aria-label="Fermer l'alerte PDF" compact onClick={() => setHistoryPdfAlert(null)} title="Fermer" type="button" variant="secondary">
+          <AppIcon name="x" />
+        </AppButton>
+      </div>
+    ) : null}
+    </>
+  );
+}
+
+function flattenProductionSchemaNodes(nodes: ProductSchemaNode[]): ProductSchemaNode[] {
+  return nodes.flatMap((node) => [node, ...flattenProductionSchemaNodes(node.children)]);
+}
+
+function uniqueProductionSchemaNodes(nodes: ProductSchemaNode[]): ProductSchemaNode[] {
+  const uniqueNodes = new Map<string, ProductSchemaNode>();
+  for (const node of flattenProductionSchemaNodes(nodes)) {
+    if (!uniqueNodes.has(node.id)) uniqueNodes.set(node.id, node);
+  }
+  return [...uniqueNodes.values()];
+}
+
+function renderProductionComponentRows({
+  depth,
+  expandedComponentRows,
+  lotDraftsByProductId,
+  node,
+  onLotChange,
+  onNavigateToComponent,
+  onToggleExpand,
+  rowKey,
+}: {
+  depth: number;
+  expandedComponentRows: Record<string, boolean>;
+  lotDraftsByProductId: Record<string, { lots: AvailableLotOption[]; selectedLotIds: string[]; status: "loading" | "ready" | "error" }>;
+  node: ProductSchemaNode;
+  onLotChange: (componentId: string, lotId: string) => void;
+  onNavigateToComponent: (component: ProductSchemaNode) => void;
+  onToggleExpand: (rowKey: string) => void;
+  rowKey: string;
+}) {
+  const draft = lotDraftsByProductId[node.id] ?? { lots: [], selectedLotIds: [], status: "ready" as const };
+  const selectedLot = draft.lots.find((lot) => draft.selectedLotIds.includes(lot.id)) ?? null;
+  const isExpandable = node.type === "semi_finished" && node.children.length > 0;
+  const isExpanded = Boolean(expandedComponentRows[rowKey]);
+  const rows = [
+    <tr className={cx(isExpandable && "production-semi-finished-row", isExpanded && "expanded", depth > 0 && "production-semi-finished-child-row")} key={rowKey}>
+      <td>
+        <div className={cx("production-component-name-cell", depth > 0 && "nested")}>
+          {isExpandable ? (
+            <button aria-expanded={isExpanded} className="production-expand-row-button" onClick={() => onToggleExpand(rowKey)} type="button">
+              <AppIcon name="chevronRight" />
+            </button>
+          ) : depth > 0 ? (
+            <span className="production-child-row-spacer" />
+          ) : null}
+          {node.type === "semi_finished" ? (
+            <button className="production-component-name-link" onClick={() => onNavigateToComponent(node)} type="button">
+              {node.name}
+            </button>
+          ) : (
+            <strong>{node.name}</strong>
+          )}
+        </div>
+      </td>
+      <td>
+        <ProductTypeBadge type={node.type} />
+      </td>
+      <td>
+        <ProductionLotDropdown draft={draft} onChange={(lotId) => onLotChange(node.id, lotId)} selectedLot={selectedLot} />
+      </td>
+      <td>{selectedLot ? selectedLot.supplierName || (selectedLot.sourceType === "fabrication" ? "Production interne" : "Reception") : "N/A"}</td>
+    </tr>,
+  ];
+
+  if (isExpandable && isExpanded) {
+    rows.push(
+      ...orderProductionSchemaNodes(node.children).flatMap((child, index) =>
+        renderProductionComponentRows({
+          depth: depth + 1,
+          expandedComponentRows,
+          lotDraftsByProductId,
+          node: child,
+          onLotChange,
+          onNavigateToComponent,
+          onToggleExpand,
+          rowKey: `${rowKey}/${child.id}:${index}`,
+        }),
+      ),
+    );
+  }
+
+  return rows;
+}
+
+function renderProductionPreviewRows({
+  depth,
+  expandedPreviewRows,
+  lotsByProductId,
+  node,
+  onToggleExpand,
+  rowKey,
+}: {
+  depth: number;
+  expandedPreviewRows: Record<string, boolean>;
+  lotsByProductId: Record<string, ProductionConsumptionDetail[]>;
+  node: ProductSchemaNode;
+  onToggleExpand: (rowKey: string) => void;
+  rowKey: string;
+}) {
+  const lots = lotsByProductId[node.id] ?? [];
+  const selectedLot = lots[0] ?? null;
+  const isExpandable = node.type === "semi_finished" && node.children.length > 0;
+  const isExpanded = Boolean(expandedPreviewRows[rowKey]);
+  const rows = [
+    <tr className={cx(isExpandable && "production-semi-finished-row", isExpanded && "expanded", depth > 0 && "production-semi-finished-child-row")} key={rowKey}>
+      <td>
+        <div className={cx("production-component-name-cell", depth > 0 && "nested")}>
+          {isExpandable ? (
+            <button aria-expanded={isExpanded} className="production-expand-row-button" onClick={() => onToggleExpand(rowKey)} type="button">
+              <AppIcon name="chevronRight" />
+            </button>
+          ) : depth > 0 ? (
+            <span className="production-child-row-spacer" />
+          ) : null}
+          <strong>{node.name}</strong>
+        </div>
+      </td>
+      <td>
+        <ProductTypeBadge type={node.type} />
+      </td>
+      <td>{selectedLot ? renderLotText(selectedLot.supplierLot || selectedLot.lotNumber, selectedLot.lotCreatedAt) : ""}</td>
+      <td>{selectedLot ? (selectedLot.sourceType === "reception" ? "Reception" : "Production interne") : "N/A"}</td>
+    </tr>,
+  ];
+
+  if (isExpandable && isExpanded) {
+    rows.push(
+      ...orderProductionSchemaNodes(node.children).flatMap((child, index) =>
+        renderProductionPreviewRows({
+          depth: depth + 1,
+          expandedPreviewRows,
+          lotsByProductId,
+          node: child,
+          onToggleExpand,
+          rowKey: `${rowKey}/${child.id}:${index}`,
+        }),
+      ),
+    );
+  }
+
+  return rows;
+}
+
+function groupProductionRowsByProductId(rows: ProductionConsumptionDetail[]) {
+  return rows.reduce<Record<string, ProductionConsumptionDetail[]>>((groups, row) => {
+    const productRows = groups[row.productId] ?? [];
+    if (!productRows.some((existingRow) => existingRow.lotId === row.lotId)) productRows.push(row);
+    groups[row.productId] = productRows;
+    return groups;
+  }, {});
+}
+
+function buildDefaultExpandedProductionRows(nodes: ProductSchemaNode[], parentKey = "") {
+  return orderProductionSchemaNodes(nodes).reduce<Record<string, boolean>>((expandedRows, node, index) => {
+    const rowKey = parentKey ? `${parentKey}/${node.id}:${index}` : `${node.id}:${index}`;
+    if (node.type === "semi_finished" && node.children.length > 0) {
+      expandedRows[rowKey] = true;
+      Object.assign(expandedRows, buildDefaultExpandedProductionRows(node.children, rowKey));
+    }
+    return expandedRows;
+  }, {});
+}
+
+function orderProductionComponentDrafts(drafts: ProductionComponentDraft[]) {
+  return [...drafts].sort((left, right) => productionChildTypeOrder(left.component.type) - productionChildTypeOrder(right.component.type));
+}
+
+function orderProductionSchemaNodes(nodes: ProductSchemaNode[]) {
+  return [...nodes].sort((left, right) => productionChildTypeOrder(left.type) - productionChildTypeOrder(right.type));
+}
+
+function productionChildTypeOrder(type: ProductType) {
+  if (type === "raw") return 0;
+  if (type === "semi_finished") return 1;
+  return 2;
+}
+
+function isWaterComponent(component: ProductSchemaNode) {
+  return component.type === "raw" && normalizeSearchText(component.name) === "eau";
+}
+
+function isDeleteKeyboardShortcut(event: globalThis.KeyboardEvent) {
+  return (
+    event.key === "Delete" ||
+    event.key === "Backspace" ||
+    event.key === "Clear" ||
+    event.key === "Cancel" ||
+    event.code === "Delete" ||
+    event.code === "Backspace"
+  );
+}
+
+function isEditableDeleteTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const editable = target.closest("input, textarea, select, [contenteditable='true'], [contenteditable='']");
+  if (!(editable instanceof HTMLElement)) return false;
+  return !(editable instanceof HTMLInputElement && editable.type === "checkbox");
+}
+
+function ProductionHistoryDeleteDialog({
+  batches,
+  isDeleting,
+  onCancel,
+  onConfirm,
+}: {
+  batches: ProductionBatch[];
+  isDeleting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AppDialogShell
+      footer={
+        <>
+          <AppButton disabled={isDeleting} onClick={onCancel} type="button" variant="secondary">
+            Annuler
+          </AppButton>
+          <AppButton disabled={isDeleting} onClick={onConfirm} type="button" variant="dangerSoft">
+            {isDeleting ? <TraceabilityLoader compact label="Suppression..." /> : "Supprimer"}
+          </AppButton>
+        </>
+      }
+      mode="modal"
+      onClose={onCancel}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onConfirm();
+      }}
+      title={batches.length === 1 ? "Supprimer la production" : "Supprimer les productions"}
+    >
+      <div className="production-delete-confirmation">
+        <p>
+          {batches.length === 1
+            ? "Cette production sera supprimee de l'historique avec son lot genere."
+            : `${batches.length} productions seront supprimees de l'historique avec leurs lots generes.`}
+        </p>
+        <ul>
+          {batches.slice(0, 6).map((batch) => (
+            <li key={batch.id}>
+              <strong>{batch.generatedLot}</strong>
+              <span>{batch.productName}</span>
+            </li>
+          ))}
+        </ul>
+        {batches.length > 6 ? <p>{batches.length - 6} autre(s) production(s).</p> : null}
+      </div>
+    </AppDialogShell>
+  );
+}
+
+function ProductionLotDropdown({
+  draft,
+  onChange,
+  selectedLot,
+}: {
+  draft: { lots: AvailableLotOption[]; selectedLotIds: string[]; status: "loading" | "ready" | "error" };
+  onChange: (lotId: string) => void;
+  selectedLot: AvailableLotOption | null;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function closeOnOutsidePointer(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setIsOpen(false);
+    }
+
+    document.addEventListener("mousedown", closeOnOutsidePointer);
+    return () => document.removeEventListener("mousedown", closeOnOutsidePointer);
+  }, []);
+
+  const disabled = draft.status === "error" || draft.lots.length === 0;
+  const label = selectedLot ? renderLotText(selectedLot.supplierLot || selectedLot.lotNumber, selectedLot.createdAt) : <span className="production-lot-placeholder">Aucun lot disponible</span>;
+
+  return (
+    <div className="production-lot-dropdown" ref={rootRef}>
+      <button className="production-lot-trigger" disabled={disabled} onClick={() => setIsOpen((current) => !current)} type="button">
+        {label}
+        <AppIcon name="chevronDown" />
+      </button>
+      {isOpen && !disabled ? (
+        <div className="production-lot-menu">
+          {draft.lots.map((lot) => (
+            <button
+              aria-selected={selectedLot?.id === lot.id}
+              className="production-lot-option"
+              key={lot.id}
+              onClick={() => {
+                onChange(lot.id);
+                setIsOpen(false);
+              }}
+              type="button"
+            >
+              {renderLotText(lot.supplierLot || lot.lotNumber, lot.createdAt)}
+              {selectedLot?.id === lot.id ? <AppIcon name="check" /> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function renderLotText(lotNumber: string, dateValue: string) {
+  return (
+    <span className="production-lot-label">
+      <strong>{lotNumber}</strong>
+      <span>| {formatDateTime(dateValue)}</span>
+    </span>
   );
 }
 
@@ -1071,7 +2415,9 @@ function ReceptionBatchLinesTable({ lines, status }: { lines: ReceptionBatchLine
         </thead>
         <tbody>
           {status === "loading" ? (
-            <TableEmpty colSpan={8}>Chargement des lignes...</TableEmpty>
+            <TableEmpty colSpan={8}>
+              <TraceabilityLoader label="Chargement des lignes..." />
+            </TableEmpty>
           ) : null}
           {status === "error" ? (
             <TableEmpty colSpan={8}>Impossible de charger les lignes.</TableEmpty>
@@ -1213,13 +2559,12 @@ function ReceptionEntryLinesTable({
 	            <th>Qte</th>
 	            <th>Unite</th>
 	            <th>Lot fournisseur</th>
-	            <th>Temp C</th>
-	            <th>Statut</th>
+	            <th>Date de Peremption</th>
 	          </tr>
 	        </thead>
 	        <tbody>
 	          {lines.length === 0 ? (
-	            <TableEmpty colSpan={7}>Ajoutez des articles depuis le catalogue fournisseur.</TableEmpty>
+	            <TableEmpty colSpan={6}>Ajoutez des articles depuis le catalogue fournisseur.</TableEmpty>
 	          ) : null}
 	          {lines.map((line) => (
 	            <tr className={cx(selectedLineIds.includes(line.localId) && "selected-row")} key={line.localId}>
@@ -1263,28 +2608,8 @@ function ReceptionEntryLinesTable({
 	                />
               </td>
 	              <td>
-	                <input
-	                  data-line-id={line.localId}
-	                  data-reception-nav-field="transportTemperature"
-	                  step="0.1"
-	                  type="text"
-	                  value={line.transportTemperature}
-	                  onChange={(event) => onUpdate(line.localId, { transportTemperature: event.target.value })}
-	                />
-	              </td>
-	              <td>
-	                <div data-line-id={line.localId} data-reception-nav-field="status">
-	                  <AppCombobox
-	                    openOnFocus={false}
-	                    options={receptionStatusOptions}
-	                    onChange={(status) =>
-	                      onUpdate(line.localId, {
-	                        temperatureStatus: status,
-	                        hygieneStatus: status,
-	                      })
-	                    }
-	                    value={line.temperatureStatus}
-	                  />
+	                <div data-line-id={line.localId} data-reception-nav-field="expiryDate">
+	                  <AppDatePicker allowClear value={line.expiryDate} onChange={(expiryDate) => onUpdate(line.localId, { expiryDate })} />
 	                </div>
 	              </td>
             </tr>
@@ -1310,33 +2635,31 @@ function validateReceptionDraft(supplierId: string, lines: ReceptionDraftLine[])
 }
 
 function FabricationList({
+  columnFilters,
   products,
+  onColumnFiltersChange,
   onCreate,
   onSelect,
   onProductSaved,
 }: {
+  columnFilters: ProductColumnFilter[];
   products: Product[];
+  onColumnFiltersChange: (filters: ProductColumnFilter[]) => void;
   onCreate: () => void;
   onSelect: (product: Product) => void;
   onProductSaved: () => Promise<void>;
 }) {
-  const [productFilter, setProductFilter] = useState<ProductType | "all">("all");
-  const [search, setSearch] = useState("");
   const [showProductForm, setShowProductForm] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const componentFilterSuggestions = useMemo(() => {
+    return [...new Set(products.flatMap((product) => product.componentNames))].sort((left, right) => left.localeCompare(right, "fr"));
+  }, [products]);
 
   const filteredProducts = useMemo(() => {
-    const normalizedSearch = search.trim().toLowerCase();
-
     return products.filter((product) => {
-      const matchesType = productFilter === "all" || product.type === productFilter;
-      const matchesSearch =
-        normalizedSearch.length === 0 ||
-        product.name.toLowerCase().includes(normalizedSearch) ||
-        product.code.toLowerCase().includes(normalizedSearch);
-
-      return matchesType && matchesSearch;
+      return matchesProductColumnFilters(product, columnFilters);
     });
-  }, [productFilter, products, search]);
+  }, [columnFilters, products]);
 
   return (
     <main className="page">
@@ -1366,15 +2689,76 @@ function FabricationList({
       ) : null}
 
       <ProductTable
+        columnFilters={columnFilters}
+        componentFilterSuggestions={componentFilterSuggestions}
         filteredProducts={filteredProducts}
-        productFilter={productFilter}
-        search={search}
         selectedProductId=""
-        onFilterChange={setProductFilter}
-        onSearchChange={setSearch}
+        onColumnFiltersChange={onColumnFiltersChange}
+        onEdit={setEditingProduct}
         onSelect={onSelect}
       />
+
+      {editingProduct ? (
+        <ProductEditDialog
+          product={editingProduct}
+          onCancel={() => setEditingProduct(null)}
+          onSaved={async () => {
+            await onProductSaved();
+            setEditingProduct(null);
+          }}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function ProductEditDialog({ product, onCancel, onSaved }: { product: Product; onCancel: () => void; onSaved: () => Promise<void> }) {
+  const [name, setName] = useState(product.name);
+  const [type, setType] = useState<ProductType>(product.type);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    setSaveStatus("saving");
+    setMessage("");
+
+    try {
+      await updateProductCatalogItem(product.id, { name, type, unit: product.unit });
+      await onSaved();
+    } catch (error) {
+      console.error("Product update failed", error);
+      setSaveStatus("error");
+      setMessage(formatApiError(error, "Impossible de modifier le produit."));
+    }
+  }
+
+  return (
+    <AppDialogShell
+      footer={
+        <>
+          <AppButton onClick={onCancel} type="button" variant="secondary">
+            Annuler
+          </AppButton>
+          <AppButton disabled={saveStatus === "saving"} type="submit">
+            {saveStatus === "saving" ? <TraceabilityLoader compact label="Enregistrement..." /> : "Enregistrer"}
+          </AppButton>
+        </>
+      }
+      onClose={onCancel}
+      onSubmit={handleSubmit}
+      title="Modifier produit"
+    >
+      <div className="product-create-grid">
+        <Field label="Nom du produit">
+          <input autoFocus value={name} onChange={(event) => setName(event.target.value)} required />
+        </Field>
+        <Field label="Type">
+          <AppCombobox options={productTypeEditOptions} onChange={setType} value={type} />
+        </Field>
+      </div>
+      {message ? <p className="save-message error">{message}</p> : null}
+    </AppDialogShell>
   );
 }
 
@@ -1432,7 +2816,7 @@ function ProductCreationPanel({ onCancel, onSaved }: { onCancel: () => void; onS
           Annuler
         </AppButton>
         <AppButton disabled={saveStatus === "saving"} type="submit">
-          {saveStatus === "saving" ? "Creation..." : "Enregistrer produit"}
+          {saveStatus === "saving" ? <TraceabilityLoader compact label="Creation..." /> : "Enregistrer produit"}
         </AppButton>
       </div>
     </AppCardForm>
@@ -1645,7 +3029,7 @@ function FabricationSchemaWorkspace({
             Retour
           </AppButton>
           <AppButton disabled={!canSaveSchema} onClick={handleSaveSchema} type="button">
-            {saveStatus === "saving" ? "Enregistrement..." : "Enregistrer schema"}
+            {saveStatus === "saving" ? <TraceabilityLoader compact label="Enregistrement..." /> : "Enregistrer schema"}
           </AppButton>
         </div>
       </header>
@@ -1882,7 +3266,7 @@ function FreeCanvasGraph({
         <span className="panel-icon">SC</span>
         <div>
           <h2>Canvas schema</h2>
-          <p>{schemaStatus === "loading" ? "Chargement..." : `${nodes.length} composant(s)`}</p>
+          <p>{schemaStatus === "loading" ? <TraceabilityLoader compact label="Chargement..." /> : `${nodes.length} composant(s)`}</p>
         </div>
         <AppButton compact disabled={!targetProduct} onClick={onResetLayout} type="button" variant="secondary">
           Recentrer
@@ -2208,20 +3592,20 @@ function SelectedProductPanel({
 }
 
 function ProductTable({
+  columnFilters,
+  componentFilterSuggestions,
   filteredProducts,
-  productFilter,
-  search,
   selectedProductId,
-  onFilterChange,
-  onSearchChange,
+  onColumnFiltersChange,
+  onEdit,
   onSelect,
 }: {
+  columnFilters: ProductColumnFilter[];
+  componentFilterSuggestions: string[];
   filteredProducts: Product[];
-  productFilter: ProductType | "all";
-  search: string;
   selectedProductId: string;
-  onFilterChange: (filter: ProductType | "all") => void;
-  onSearchChange: (search: string) => void;
+  onColumnFiltersChange: (filters: ProductColumnFilter[]) => void;
+  onEdit: (product: Product) => void;
   onSelect: (product: Product) => void;
 }) {
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
@@ -2255,26 +3639,10 @@ function ProductTable({
             <p>Produits lus depuis Supabase.</p>
           </div>
         </div>
-        <div className="table-actions">
-          <input autoComplete="off" placeholder="Filtrer les produits..." value={search} onChange={(event) => onSearchChange(event.target.value)} />
-          <button className="table-tool-button" type="button">
-            <AppIcon name="columns" />
-            <span>Colonnes</span>
-            <AppIcon name="chevronDown" />
-          </button>
-          <button className="table-tool-button primary" type="button">
-            <AppIcon name="plus" />
-            <span>Produit</span>
-          </button>
-        </div>
       </div>
 
-      <div className="filter-row">
-        {(["all", "raw", "semi_finished", "finished"] as const).map((filter) => (
-          <button className={cx("filter", productFilter === filter && "active")} key={filter} onClick={() => onFilterChange(filter)} type="button">
-            {filter === "all" ? "Tous" : typeLabels[filter]}
-          </button>
-        ))}
+      <div className="product-search-row">
+        <ProductColumnFilterBar componentSuggestions={componentFilterSuggestions} filters={columnFilters} onFiltersChange={onColumnFiltersChange} />
       </div>
 
       <div className="table-wrap">
@@ -2296,9 +3664,9 @@ function ProductTable({
                   <span></span>
                 </label>
               </th>
-              <th>Code</th>
               <th>Produit</th>
               <th>Type</th>
+              <th>Categorie</th>
               <th>Recette / nomenclature</th>
               <th>Composants</th>
               <th>Derniere modification</th>
@@ -2328,13 +3696,11 @@ function ProductTable({
                     <span></span>
                   </label>
                 </td>
-                <td>
-                  <strong>{product.code}</strong>
-                </td>
                 <td>{product.name}</td>
                 <td>
                   <ProductTypeBadge type={product.type} />
                 </td>
+                <td>{formatCategory(product.category)}</td>
                 <td>
                   <RecipeBadge status={product.recipeStatus} />
                 </td>
@@ -2346,9 +3712,7 @@ function ProductTable({
                   </button>
                 </td>
                 <td className="actions-column">
-                  <button className="table-icon-button" title="Actions" type="button">
-                    <AppIcon name="dots" />
-                  </button>
+                  <ProductTableActionsDropdown onEdit={() => onEdit(product)} />
                 </td>
               </tr>
             ))}
@@ -2358,6 +3722,454 @@ function ProductTable({
       <DataTableFooter itemCount={filteredProducts.length} selectedCount={selectedVisibleCount} />
     </AppCard>
   );
+}
+
+function ProductTableActionsDropdown({ onEdit }: { onEdit: () => void }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function closeOnOutsidePointer(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", closeOnOutsidePointer);
+    return () => document.removeEventListener("mousedown", closeOnOutsidePointer);
+  }, []);
+
+  return (
+    <div className="table-actions-dropdown" ref={rootRef}>
+      <button
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
+        className="table-icon-button"
+        onClick={() => setIsOpen((current) => !current)}
+        title="Actions"
+        type="button"
+      >
+        <AppIcon name="dots" />
+      </button>
+      {isOpen ? (
+        <div className="table-actions-menu product-actions-menu" role="menu">
+          <button
+            onClick={() => {
+              onEdit();
+              setIsOpen(false);
+            }}
+            role="menuitem"
+            type="button"
+          >
+            Modifier
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductColumnFilterBar({
+  componentSuggestions = [],
+  dateHelperColumns = ["lastUpdated"],
+  filters,
+  options = productColumnFilterOptions,
+  onFiltersChange,
+  placeholder = "Filter by produit, type...",
+  valueSuggestions = productColumnValueSuggestions,
+}: {
+  componentSuggestions?: string[];
+  dateHelperColumns?: ProductColumnFilterKey[];
+  filters: ProductColumnFilter[];
+  options?: ProductColumnFilterOption[];
+  onFiltersChange: (filters: ProductColumnFilter[]) => void;
+  placeholder?: string;
+  valueSuggestions?: Partial<Record<ProductColumnFilterKey, string[]>>;
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const pendingValueFocusRef = useRef<string | null>(null);
+  const filterCommitTimerRef = useRef<number | null>(null);
+  const draftFiltersRef = useRef(filters);
+  const suppressNextValueFocusRef = useRef(false);
+  const [draftFilters, setDraftFilters] = useState(filters);
+  const [isOpen, setIsOpen] = useState(false);
+  const [columnQuery, setColumnQuery] = useState("");
+  const [activeValueHelperFilterId, setActiveValueHelperFilterId] = useState<string | null>(null);
+  const normalizedColumnQuery = normalizeSearchText(columnQuery);
+  const visibleOptions = normalizedColumnQuery
+    ? options.filter((option) =>
+        [option.label, option.description, option.key].some((value) => normalizeSearchText(value).includes(normalizedColumnQuery)),
+      )
+    : options;
+  const activeValueHelperFilter = draftFilters.find((filter) => filter.id === activeValueHelperFilterId) ?? null;
+  const normalizedValueQuery = normalizeSearchText(activeValueHelperFilter?.value ?? "");
+  const visibleValueSuggestions = getProductColumnValueSuggestions(activeValueHelperFilter, componentSuggestions, normalizedValueQuery, valueSuggestions);
+  const showValueSuggestions = Boolean(
+    activeValueHelperFilter && !dateHelperColumns.includes(activeValueHelperFilter.column) && visibleValueSuggestions.length > 0,
+  );
+  const showDateHelper = Boolean(activeValueHelperFilter && dateHelperColumns.includes(activeValueHelperFilter.column));
+
+  useEffect(() => {
+    if (!isOpen && !activeValueHelperFilterId) return;
+
+    function handlePointerDown(event: Event) {
+      if (!rootRef.current || rootRef.current.contains(event.target as Node)) return;
+      setIsOpen(false);
+      setActiveValueHelperFilterId(null);
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [activeValueHelperFilterId, isOpen]);
+
+  useEffect(() => {
+    if (filterCommitTimerRef.current) return;
+    draftFiltersRef.current = filters;
+    setDraftFilters(filters);
+  }, [filters]);
+
+  useEffect(() => {
+    return () => {
+      if (filterCommitTimerRef.current) window.clearTimeout(filterCommitTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingValueFocusRef.current) return;
+    const input = rootRef.current?.querySelector<HTMLInputElement>(`[data-filter-value-id="${pendingValueFocusRef.current}"]`);
+    pendingValueFocusRef.current = null;
+    input?.focus();
+  }, [draftFilters]);
+
+  function focusFilterValue(filterId: string, placeCaretAtEnd = false) {
+    window.requestAnimationFrame(() => {
+      const input = rootRef.current?.querySelector<HTMLInputElement>(`[data-filter-value-id="${filterId}"]`);
+      input?.focus();
+      if (input && placeCaretAtEnd) {
+        const caretPosition = input.value.length;
+        input.setSelectionRange(caretPosition, caretPosition);
+      }
+    });
+  }
+
+  function closeFilterDropdowns() {
+    setIsOpen(false);
+    setActiveValueHelperFilterId(null);
+  }
+
+  function commitFilters(nextFilters: ProductColumnFilter[], mode: "immediate" | "debounced" = "immediate") {
+    if (filterCommitTimerRef.current) {
+      window.clearTimeout(filterCommitTimerRef.current);
+      filterCommitTimerRef.current = null;
+    }
+
+    if (mode === "immediate") {
+      onFiltersChange(nextFilters);
+      return;
+    }
+
+    filterCommitTimerRef.current = window.setTimeout(() => {
+      filterCommitTimerRef.current = null;
+      onFiltersChange(nextFilters);
+    }, 120);
+  }
+
+  function updateDraftFilters(nextFilters: ProductColumnFilter[]) {
+    draftFiltersRef.current = nextFilters;
+    setDraftFilters(nextFilters);
+  }
+
+  function selectColumn(nextColumn: ProductColumnFilterKey) {
+    const nextFilter: ProductColumnFilter = {
+      id: `${nextColumn}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      column: nextColumn,
+      value: "",
+    };
+    const nextFilters = [...draftFiltersRef.current, nextFilter];
+    pendingValueFocusRef.current = nextFilter.id;
+    updateDraftFilters(nextFilters);
+    commitFilters(nextFilters);
+    setColumnQuery("");
+    closeFilterDropdowns();
+  }
+
+  function updateFilterValue(filterId: string, value: string, mode: "immediate" | "debounced" = "debounced") {
+    const nextFilters = draftFiltersRef.current.map((filter) => (filter.id === filterId ? { ...filter, value } : filter));
+    updateDraftFilters(nextFilters);
+    commitFilters(nextFilters, mode);
+  }
+
+  function selectValueSuggestion(filterId: string, value: string) {
+    updateFilterValue(filterId, value, "immediate");
+    closeFilterDropdowns();
+    suppressNextValueFocusRef.current = true;
+    focusFilterValue(filterId, true);
+  }
+
+  function selectFilterDate(filterId: string, value: string) {
+    updateFilterValue(filterId, value, "immediate");
+    closeFilterDropdowns();
+    suppressNextValueFocusRef.current = true;
+    focusFilterValue(filterId, true);
+  }
+
+  function removeFilter(filterId: string) {
+    const nextFilters = draftFiltersRef.current.filter((filter) => filter.id !== filterId);
+    updateDraftFilters(nextFilters);
+    commitFilters(nextFilters);
+    closeFilterDropdowns();
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function handleFilterValueKeyDown(event: KeyboardEvent<HTMLInputElement>, filter: ProductColumnFilter) {
+    if (!hasProductColumnValueHelper(filter.column, valueSuggestions, dateHelperColumns)) return;
+
+    if (event.key === "Backspace" && shouldClearWholeFilterValue(filter, valueSuggestions, dateHelperColumns)) {
+      event.preventDefault();
+      updateFilterValue(filter.id, "");
+      setActiveValueHelperFilterId(filter.id);
+      focusFilterValue(filter.id);
+      return;
+    }
+
+    if (event.key === "Escape") {
+      setActiveValueHelperFilterId(null);
+      return;
+    }
+
+    if (event.key === "Enter" && visibleValueSuggestions[0]) {
+      event.preventDefault();
+      selectValueSuggestion(filter.id, visibleValueSuggestions[0]);
+    }
+  }
+
+  function handleFreeInputKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape") {
+      setIsOpen(false);
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      setIsOpen(true);
+      return;
+    }
+
+    if (event.key === "Enter" && visibleOptions[0]) {
+      event.preventDefault();
+      selectColumn(visibleOptions[0].key);
+    }
+  }
+
+  return (
+    <div className="column-filter-bar" ref={rootRef}>
+      <div className={cx("column-filter-input-shell", isOpen && "open")}>
+        <button className="column-filter-leading" onClick={() => inputRef.current?.focus()} type="button">
+          <AppIcon name="search" />
+        </button>
+        <div className="column-filter-condition-list">
+          {draftFilters.map((filter) => {
+            const option = options.find((candidate) => candidate.key === filter.column);
+            const label = option?.label ?? filter.column;
+
+            return (
+              <div className="column-filter-condition" key={filter.id}>
+                <button
+                  className="column-filter-condition-column"
+                  onClick={() => {
+                    setActiveValueHelperFilterId(null);
+                    setIsOpen(true);
+                  }}
+                  type="button"
+                >
+                  {label}
+                </button>
+                <span className="column-filter-operator-wrap">
+                  <input aria-label={`Operateur pour ${label}`} className="column-filter-operator" readOnly tabIndex={-1} value="=" />
+                  <span aria-hidden="true">=</span>
+                </span>
+                <span className="column-filter-value-wrap">
+                  <input
+                    aria-label={`Valeur pour ${label}`}
+                    autoComplete="off"
+                    data-filter-value-id={filter.id}
+                    onChange={(event) => {
+                      updateFilterValue(filter.id, event.target.value);
+                      setActiveValueHelperFilterId(hasProductColumnValueHelper(filter.column, valueSuggestions, dateHelperColumns) ? filter.id : null);
+                    }}
+                    onFocus={() => {
+                      if (suppressNextValueFocusRef.current) {
+                        suppressNextValueFocusRef.current = false;
+                        return;
+                      }
+                      setIsOpen(false);
+                      setActiveValueHelperFilterId(hasProductColumnValueHelper(filter.column, valueSuggestions, dateHelperColumns) ? filter.id : null);
+                    }}
+                    onKeyDown={(event) => handleFilterValueKeyDown(event, filter)}
+                    value={filter.value}
+                  />
+                  <span aria-hidden="true">{filter.value || " "}</span>
+                </span>
+                <button aria-label={`Supprimer le filtre ${label}`} className="column-filter-remove" onClick={() => removeFilter(filter.id)} type="button">
+                  <AppIcon name="x" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <input
+          autoComplete="off"
+          className="column-filter-free-input"
+          onChange={(event) => {
+            setColumnQuery(event.target.value);
+            setIsOpen(true);
+            setActiveValueHelperFilterId(null);
+          }}
+          onFocus={() => {
+            setIsOpen(true);
+            setActiveValueHelperFilterId(null);
+          }}
+          onKeyDown={handleFreeInputKeyDown}
+          placeholder={draftFilters.length > 0 ? "Add more filters..." : placeholder}
+          ref={inputRef}
+          value={columnQuery}
+        />
+        {draftFilters.length > 0 ? (
+          <button
+            aria-label="Effacer tous les filtres"
+            className="column-filter-clear"
+            onClick={() => {
+              updateDraftFilters([]);
+              commitFilters([]);
+              setColumnQuery("");
+              closeFilterDropdowns();
+            }}
+            type="button"
+          >
+            <AppIcon name="x" />
+          </button>
+        ) : null}
+      </div>
+      {isOpen ? (
+        <div className="column-filter-menu" role="listbox">
+          {visibleOptions.map((option) => (
+            <button
+              aria-selected={false}
+              className="column-filter-option"
+              key={option.key}
+              onClick={() => selectColumn(option.key)}
+              role="option"
+              type="button"
+            >
+              <span>{option.label}</span>
+            </button>
+          ))}
+          {visibleOptions.length === 0 ? <div className="column-filter-empty">Aucune colonne trouvee.</div> : null}
+        </div>
+      ) : null}
+      {showValueSuggestions && activeValueHelperFilter ? (
+        <div className="column-filter-helper-menu" role="listbox">
+          {visibleValueSuggestions.map((name) => (
+            <button className="column-filter-option" key={name} onClick={() => selectValueSuggestion(activeValueHelperFilter.id, name)} role="option" type="button">
+              <span>{name}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {showDateHelper && activeValueHelperFilter ? (
+        <div className="column-filter-calendar-menu">
+          <AppCalendar
+            className="column-filter-calendar"
+            onChange={(value) => selectFilterDate(activeValueHelperFilter.id, value)}
+            value={activeValueHelperFilter.value}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function hasProductColumnValueHelper(
+  column: ProductColumnFilterKey,
+  valueSuggestions: Partial<Record<ProductColumnFilterKey, string[]>> = productColumnValueSuggestions,
+  dateHelperColumns: ProductColumnFilterKey[] = ["lastUpdated"],
+) {
+  return Boolean(valueSuggestions[column]?.length) || column === "componentCount" || dateHelperColumns.includes(column);
+}
+
+function shouldClearWholeFilterValue(
+  filter: ProductColumnFilter,
+  valueSuggestions: Partial<Record<ProductColumnFilterKey, string[]>> = productColumnValueSuggestions,
+  dateHelperColumns: ProductColumnFilterKey[] = ["lastUpdated"],
+) {
+  return Boolean(filter.value) && (Boolean(valueSuggestions[filter.column]?.length) || dateHelperColumns.includes(filter.column));
+}
+
+function getProductColumnValueSuggestions(
+  filter: ProductColumnFilter | null,
+  componentSuggestions: string[],
+  normalizedQuery: string,
+  valueSuggestions: Partial<Record<ProductColumnFilterKey, string[]>> = productColumnValueSuggestions,
+) {
+  if (!filter) return [];
+  if (filter.column === "componentCount") {
+    if (!normalizedQuery) return [];
+    return componentSuggestions.filter((name) => normalizeSearchText(name).includes(normalizedQuery)).slice(0, 8);
+  }
+
+  const suggestions = productColumnValueSuggestions[filter.column] ?? [];
+  if (!normalizedQuery) return suggestions;
+  return suggestions.filter((name) => normalizeSearchText(name).includes(normalizedQuery));
+}
+
+function matchesProductColumnFilters(product: Product, filters: ProductColumnFilter[]) {
+  const activeFilters = filters.filter((filter) => normalizeSearchText(filter.value));
+  if (activeFilters.length === 0) return true;
+
+  return activeFilters.every((filter) =>
+    getProductColumnFilterValues(product, filter.column).some((value) => normalizeSearchText(value).includes(normalizeSearchText(filter.value))),
+  );
+}
+
+function getProductColumnFilterValues(product: Product, column: ProductColumnFilterKey) {
+  const values: Record<ProductColumnFilterKey, string[]> = {
+    name: [product.name],
+    type: [typeLabels[product.type], product.type],
+    category: [formatCategory(product.category), product.category ?? ""],
+    recipeStatus: [recipeLabels[product.recipeStatus], product.recipeStatus],
+    componentCount: [String(product.componentCount || 0), ...product.componentNames],
+    lastUpdated: [formatDate(product.lastUpdated), product.lastUpdated],
+    lot: [],
+    productionDate: [],
+    confirmedAt: [],
+  };
+
+  return values[column];
+}
+
+function matchesProductionHistoryColumnFilters(batch: ProductionBatch, filters: ProductColumnFilter[]) {
+  const activeFilters = filters.filter((filter) => normalizeSearchText(filter.value));
+  if (activeFilters.length === 0) return true;
+
+  return activeFilters.every((filter) =>
+    getProductionHistoryColumnFilterValues(batch, filter.column).some((value) => normalizeSearchText(value).includes(normalizeSearchText(filter.value))),
+  );
+}
+
+function getProductionHistoryColumnFilterValues(batch: ProductionBatch, column: ProductColumnFilterKey) {
+  const values: Record<ProductColumnFilterKey, string[]> = {
+    name: [batch.productName, batch.productCode],
+    type: [typeLabels[batch.productType], batch.productType],
+    category: [formatCategory(batch.category), batch.category ?? ""],
+    recipeStatus: [],
+    componentCount: [String(batch.consumedLotCount || 0)],
+    lastUpdated: [],
+    lot: [batch.generatedLot],
+    productionDate: [formatDate(batch.productionDate), batch.productionDate],
+    confirmedAt: [formatDateTime(batch.createdAt), formatDate(batch.createdAt), batch.createdAt],
+  };
+
+  return values[column];
 }
 
 function DataTableFooter({ itemCount, selectedCount }: { itemCount: number; selectedCount: number }) {
@@ -2446,6 +4258,7 @@ function SuppliersModule({
   const [selectedSupplierId, setSelectedSupplierId] = useState(suppliers[0]?.id ?? "");
   const [assignments, setAssignments] = useState<Record<string, string[]>>({});
   const [supplierSearch, setSupplierSearch] = useState("");
+  const [supplierMaterialSearch, setSupplierMaterialSearch] = useState("");
   const [activeTab, setActiveTab] = useState<SupplierTab>("materials");
   const [formMode, setFormMode] = useState<"create" | "edit" | null>(null);
   const [supplierForm, setSupplierForm] = useState<SupplierFormState>({ name: "", contact: "" });
@@ -2477,10 +4290,15 @@ function SuppliersModule({
     () => rawProducts.filter((product) => selectedProductIds.includes(product.id)).sort((a, b) => a.name.localeCompare(b.name)),
     [rawProducts, selectedProductIds],
   );
+  const filteredLinkedProducts = useMemo(() => filterProducts(linkedProducts, supplierMaterialSearch), [linkedProducts, supplierMaterialSearch]);
 
   useEffect(() => {
     setSelectedSupplierId((current) => (current && suppliers.some((supplier) => supplier.id === current) ? current : suppliers[0]?.id || ""));
   }, [suppliers]);
+
+  useEffect(() => {
+    setSupplierMaterialSearch("");
+  }, [selectedSupplierId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2561,8 +4379,8 @@ function SuppliersModule({
     }
   }
 
-  async function persistSupplierMaterials(productIds: string[], successMessage: string) {
-    if (!selectedSupplierId) {
+  async function persistSupplierMaterialsForSupplier(supplierId: string, productIds: string[], successMessage: string) {
+    if (!supplierId) {
       setSaveStatus("error");
       setMessage("Selectionnez un fournisseur.");
       return false;
@@ -2571,8 +4389,8 @@ function SuppliersModule({
     setSaveStatus("saving");
     setMessage("");
     try {
-      await saveSupplierMaterialAssignments(selectedSupplierId, productIds);
-      setLocalAssignment(selectedSupplierId, productIds);
+      await saveSupplierMaterialAssignments(supplierId, productIds);
+      setLocalAssignment(supplierId, productIds);
       setSaveStatus("success");
       setMessage(successMessage);
       return true;
@@ -2584,7 +4402,11 @@ function SuppliersModule({
     }
   }
 
-  async function createAndLinkRawMaterial(event: FormEvent) {
+  async function persistSupplierMaterials(productIds: string[], successMessage: string) {
+    return persistSupplierMaterialsForSupplier(selectedSupplierId, productIds, successMessage);
+  }
+
+  async function handleMaterialModalSubmit(event: FormEvent) {
     event.preventDefault();
     const normalizedName = rawMaterialForm.name.trim();
     if (!normalizedName) {
@@ -2596,17 +4418,42 @@ function SuppliersModule({
     setSaveStatus("saving");
     setMessage("");
     try {
-      const productId = await createRawMaterialCatalogItem({ name: normalizedName, unit: rawMaterialForm.unit });
-      const saved = await persistSupplierMaterials([...new Set([...selectedProductIds, productId])], "Matiere ajoutee.");
-      if (!saved) return;
+      if (rawMaterialForm.id) {
+        const productId = rawMaterialForm.id;
+        const targetSupplierId = rawMaterialForm.supplierId || selectedSupplierId;
 
-      await onSuppliersChanged();
-      setRawMaterialForm({ name: "", unit: "kg" });
-      setMaterialModalOpen(false);
+        await updateRawMaterialCatalogItem(productId, normalizedName, rawMaterialForm.unit);
+
+        const currentSupplierId = selectedSupplierId;
+        if (targetSupplierId !== currentSupplierId) {
+          const oldSupplierProductIds = assignments[currentSupplierId] ?? [];
+          await saveSupplierMaterialAssignments(currentSupplierId, oldSupplierProductIds.filter(id => id !== productId));
+          setLocalAssignment(currentSupplierId, oldSupplierProductIds.filter(id => id !== productId));
+
+          const newSupplierProductIds = assignments[targetSupplierId] ?? [];
+          await saveSupplierMaterialAssignments(targetSupplierId, [...new Set([...newSupplierProductIds, productId])]);
+          setLocalAssignment(targetSupplierId, [...new Set([...newSupplierProductIds, productId])]);
+        }
+
+        setMessage("Matiere premiere modifiee.");
+        setSaveStatus("success");
+        await onSuppliersChanged();
+        setMaterialModalOpen(false);
+      } else {
+        const productId = await createRawMaterialCatalogItem({ name: normalizedName, unit: rawMaterialForm.unit });
+        const targetSupplierId = rawMaterialForm.supplierId || selectedSupplierId;
+        const targetProductIds = assignments[targetSupplierId] ?? [];
+        const saved = await persistSupplierMaterialsForSupplier(targetSupplierId, [...new Set([...targetProductIds, productId])], "Matiere ajoutee.");
+        if (!saved) return;
+
+        await onSuppliersChanged();
+        setRawMaterialForm({ name: "", unit: "kg" });
+        setMaterialModalOpen(false);
+      }
     } catch (error) {
-      console.error("Raw material creation failed", error);
+      console.error("Raw material save failed", error);
       setSaveStatus("error");
-      setMessage(formatApiError(error, "Impossible d'ajouter la matiere premiere."));
+      setMessage(formatApiError(error, "Impossible d'enregistrer la matiere premiere."));
     }
   }
 
@@ -2772,7 +4619,7 @@ function SuppliersModule({
 	                      disabled={!selectedSupplierId}
 	                      onClick={() => {
 	                        setMaterialModalOpen(true);
-	                        setRawMaterialForm({ name: "", unit: "kg" });
+	                        setRawMaterialForm({ name: "", unit: "kg", supplierId: selectedSupplierId });
 	                      }}
                         title="Ajouter une matiere"
 	                      type="button"
@@ -2780,7 +4627,27 @@ function SuppliersModule({
                       <AppIcon name="plus" />
                     </button>
                   </div>
-                  <SupplierMaterialsTable products={linkedProducts} onUnlink={unlinkMaterial} />
+                  <input
+                    className="supplier-material-search"
+                    placeholder="Rechercher une matiere..."
+                    type="search"
+                    value={supplierMaterialSearch}
+                    onChange={(event) => setSupplierMaterialSearch(event.target.value)}
+                  />
+                  <SupplierMaterialsTable
+                    products={filteredLinkedProducts}
+                    totalCount={linkedProducts.length}
+                    onEdit={(product) => {
+                      setRawMaterialForm({
+                        id: product.id,
+                        name: product.name,
+                        unit: product.unit as "kg" | "piece",
+                        supplierId: selectedSupplierId,
+                      });
+                      setMaterialModalOpen(true);
+                    }}
+                    onUnlink={unlinkMaterial}
+                  />
                 </div>
               ) : null}
 
@@ -2808,17 +4675,145 @@ function SuppliersModule({
       {materialModalOpen ? (
         <MaterialLinkModal
           form={rawMaterialForm}
+          suppliers={suppliers}
           saveStatus={saveStatus}
           onCancel={() => setMaterialModalOpen(false)}
           onChange={setRawMaterialForm}
-          onSubmit={createAndLinkRawMaterial}
+          onSubmit={handleMaterialModalSubmit}
         />
       ) : null}
     </main>
   );
 }
 
-function SupplierMaterialsTable({ products, onUnlink }: { products: Product[]; onUnlink: (productId: string) => Promise<void> }) {
+function TableActionsDropdown({
+  onEdit,
+  onUnlink,
+}: {
+  onEdit: () => void;
+  onUnlink: () => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function closeOnOutsidePointer(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", closeOnOutsidePointer);
+    return () => document.removeEventListener("mousedown", closeOnOutsidePointer);
+  }, []);
+
+  return (
+    <div className="table-actions-dropdown" ref={rootRef} style={{ position: "relative" }}>
+      <button
+        className="icon-button actions-trigger"
+        onClick={() => setIsOpen((prev) => !prev)}
+        type="button"
+        style={{
+          background: "transparent",
+          border: "none",
+          cursor: "pointer",
+          padding: "4px 8px",
+          borderRadius: "4px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--muted)",
+        }}
+      >
+        <AppIcon name="dots" />
+      </button>
+      {isOpen && (
+        <div
+          className="table-actions-menu"
+          style={{
+            position: "absolute",
+            right: 0,
+            top: "100%",
+            zIndex: 100,
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: "4px",
+            boxShadow: "var(--shadow)",
+            minWidth: "120px",
+            display: "flex",
+            flexDirection: "column",
+            padding: "4px 0",
+          }}
+        >
+          <button
+            onClick={() => {
+              onEdit();
+              setIsOpen(false);
+            }}
+            type="button"
+            style={{
+              padding: "8px 12px",
+              textAlign: "left",
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              color: "var(--text)",
+              width: "100%",
+              fontWeight: 500,
+              fontSize: "13px",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--surface-soft)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+            }}
+          >
+            Modifier
+          </button>
+          <button
+            onClick={() => {
+              onUnlink();
+              setIsOpen(false);
+            }}
+            type="button"
+            className="danger-option"
+            style={{
+              padding: "8px 12px",
+              textAlign: "left",
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              color: "var(--danger)",
+              width: "100%",
+              fontWeight: 500,
+              fontSize: "13px",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--danger-bg)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+            }}
+          >
+            Detacher
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SupplierMaterialsTable({
+  products,
+  totalCount,
+  onEdit,
+  onUnlink,
+}: {
+  products: Product[];
+  totalCount: number;
+  onEdit: (product: Product) => void;
+  onUnlink: (productId: string) => Promise<void>;
+}) {
   return (
     <div className="table-wrap supplier-linked-table">
       <table className="data-table supplier-linked-data-table">
@@ -2837,14 +4832,17 @@ function SupplierMaterialsTable({ products, onUnlink }: { products: Product[]; o
               </td>
               <td>{product.unit}</td>
               <td className="actions-column">
-                <button className="table-link danger-link" onClick={() => void onUnlink(product.id)} type="button">
-                  Detacher
-                </button>
+                <TableActionsDropdown
+                  onEdit={() => onEdit(product)}
+                  onUnlink={() => void onUnlink(product.id)}
+                />
               </td>
             </tr>
           ))}
           {products.length === 0 ? (
-            <TableEmpty colSpan={3}>Aucune matiere premiere associee a ce fournisseur.</TableEmpty>
+            <TableEmpty colSpan={3}>
+              {totalCount === 0 ? "Aucune matiere premiere associee a ce fournisseur." : "Aucune matiere ne correspond a cette recherche."}
+            </TableEmpty>
           ) : null}
         </tbody>
       </table>
@@ -2876,7 +4874,7 @@ function SupplierFormDrawer({
       footer={
         <>
           <AppButton disabled={saveStatus === "saving"} type="submit">
-            {saveStatus === "saving" ? "Enregistrement..." : "Enregistrer"}
+            {saveStatus === "saving" ? <TraceabilityLoader compact label="Enregistrement..." /> : "Enregistrer"}
           </AppButton>
           <AppButton onClick={onCancel} type="button" variant="secondary">
             Annuler
@@ -2896,26 +4894,34 @@ function SupplierFormDrawer({
 
 function MaterialLinkModal({
   form,
+  suppliers,
   saveStatus,
   onCancel,
   onChange,
   onSubmit,
 }: {
   form: RawMaterialFormState;
+  suppliers: Supplier[];
   saveStatus: "idle" | "loading" | "saving" | "success" | "error";
   onCancel: () => void;
   onChange: (form: RawMaterialFormState) => void;
   onSubmit: (event: FormEvent) => void;
 }) {
+  const isEditing = !!form.id;
+
   return (
     <AppDialogShell
       onClose={onCancel}
       onSubmit={onSubmit}
-      title="Ajouter une matiere"
+      title={isEditing ? "Modifier la matiere" : "Ajouter une matiere"}
       footer={
         <>
           <AppButton disabled={saveStatus === "saving"} type="submit">
-            {saveStatus === "saving" ? "Ajout..." : "Ajouter"}
+            {saveStatus === "saving" ? (
+              <TraceabilityLoader compact label={isEditing ? "Modification..." : "Ajout..."} />
+            ) : (
+              isEditing ? "Modifier" : "Ajouter"
+            )}
           </AppButton>
           <AppButton onClick={onCancel} type="button" variant="secondary">
             Annuler
@@ -2928,6 +4934,20 @@ function MaterialLinkModal({
       </Field>
       <Field label="Unite">
         <AppCombobox options={rawMaterialUnitOptions} onChange={(unit) => onChange({ ...form, unit })} value={form.unit} />
+      </Field>
+      <Field label="Fournisseurs">
+        <select
+          value={form.supplierId || ""}
+          onChange={(event) => onChange({ ...form, supplierId: event.target.value })}
+          required
+        >
+          <option value="" disabled>Choisir un fournisseur...</option>
+          {suppliers.map((supplier) => (
+            <option key={supplier.id} value={supplier.id}>
+              {supplier.name}
+            </option>
+          ))}
+        </select>
       </Field>
     </AppDialogShell>
   );
@@ -3078,7 +5098,15 @@ function Topbar({
       <input aria-label="Recherche globale" autoComplete="off" placeholder="Rechercher..." />
       <div className="topbar-actions">
         <span className={cx("connection-status", dataStatus)}>
-          {dataStatus === "connected" ? "Supabase" : dataStatus === "loading" ? "Sync..." : dataStatus === "error" ? "Erreur Supabase" : "Supabase non configure"}
+          {dataStatus === "connected" ? (
+            "Supabase"
+          ) : dataStatus === "loading" ? (
+            <TraceabilityLoader compact label="Sync..." />
+          ) : dataStatus === "error" ? (
+            "Erreur Supabase"
+          ) : (
+            "Supabase non configure"
+          )}
         </span>
         <button className="theme-toggle" onClick={onThemeToggle} title="Changer le theme" type="button">
           <AppIcon name={theme === "dark" ? "sun" : "moon"} />
@@ -3175,6 +5203,7 @@ function AppCalendar({ value, onChange, className }: { value: string; onChange: 
   const selectedDate = parseInputDate(value);
   const [displayMonth, setDisplayMonth] = useState(() => startOfMonth(selectedDate ?? new Date()));
   const calendarCells = useMemo(() => buildCalendarCells(displayMonth), [displayMonth]);
+  const calendarYearOptions = useMemo(() => buildCalendarYearOptions(displayMonth, selectedDate), [displayMonth, selectedDate]);
   const todayValue = toInputDateValue(new Date());
 
   useEffect(() => {
@@ -3185,13 +5214,44 @@ function AppCalendar({ value, onChange, className }: { value: string; onChange: 
     setDisplayMonth((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
   }
 
+  function updateDisplayMonth(month: number) {
+    setDisplayMonth((current) => new Date(current.getFullYear(), month, 1));
+  }
+
+  function updateDisplayYear(year: number) {
+    setDisplayMonth((current) => new Date(year, current.getMonth(), 1));
+  }
+
   return (
     <div className={cx("app-calendar", className)}>
       <div className="calendar-header">
         <button aria-label="Mois precedent" onClick={() => moveMonth(-1)} type="button">
           <AppIcon name="chevronLeft" />
         </button>
-        <span>{formatCalendarMonth(displayMonth)}</span>
+        <div className="calendar-caption-selects" aria-label={formatCalendarMonth(displayMonth)}>
+          <select
+            aria-label="Mois"
+            onChange={(event) => updateDisplayMonth(Number(event.target.value))}
+            value={String(displayMonth.getMonth())}
+          >
+            {calendarMonthOptions.map((month) => (
+              <option key={month.value} value={month.value}>
+                {month.label}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Annee"
+            onChange={(event) => updateDisplayYear(Number(event.target.value))}
+            value={String(displayMonth.getFullYear())}
+          >
+            {calendarYearOptions.map((year) => (
+              <option key={year} value={year}>
+                {year}
+              </option>
+            ))}
+          </select>
+        </div>
         <button aria-label="Mois suivant" onClick={() => moveMonth(1)} type="button">
           <AppIcon name="chevronRight" />
         </button>
@@ -3524,6 +5584,12 @@ function AppIcon({ name }: { name: IconName }) {
         <path d="M5 12h14" />
       </>
     ),
+    x: (
+      <>
+        <path d="M18 6 6 18" />
+        <path d="m6 6 12 12" />
+      </>
+    ),
     sun: (
       <>
         <circle cx="12" cy="12" r="4" />
@@ -3726,6 +5792,15 @@ function startOfMonth(value: Date) {
   return new Date(value.getFullYear(), value.getMonth(), 1);
 }
 
+function buildCalendarYearOptions(displayMonth: Date, selectedDate: Date | null) {
+  const currentYear = new Date().getFullYear();
+  const anchorYear = selectedDate?.getFullYear() ?? displayMonth.getFullYear();
+  const startYear = Math.min(currentYear - 5, anchorYear - 5, displayMonth.getFullYear() - 5);
+  const endYear = Math.max(currentYear + 15, anchorYear + 15, displayMonth.getFullYear() + 15);
+
+  return Array.from({ length: endYear - startYear + 1 }, (_, index) => startYear + index);
+}
+
 function buildCalendarCells(monthDate: Date) {
   const firstDay = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
   const leadingEmptyDays = (firstDay.getDay() + 6) % 7;
@@ -3780,10 +5855,18 @@ function formatCategory(category: ProductCategory | null) {
 }
 
 function filterProducts(products: Product[], query: string) {
-  const normalizedQuery = query.trim().toLowerCase();
+  const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) return products;
 
-  return products.filter((product) => product.name.toLowerCase().includes(normalizedQuery) || product.code.toLowerCase().includes(normalizedQuery));
+  return products.filter((product) => normalizeSearchText(product.name).includes(normalizedQuery) || normalizeSearchText(product.code).includes(normalizedQuery));
+}
+
+function normalizeSearchText(value: string | number | null | undefined) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
 
 function formatSupplierCode(index: number) {

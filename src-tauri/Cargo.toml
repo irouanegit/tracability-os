@@ -1,8 +1,8 @@
 [package]
 name = "solution_tracabilite"
-version = "0.1.0"
+version = "0.1.14"
 description = "Bakery traceability desktop application"
-authors = ["Boulangerie Pro"]
+authors = ["Tracability OS"]
 license = ""
 repository = ""
 edition = "2021"

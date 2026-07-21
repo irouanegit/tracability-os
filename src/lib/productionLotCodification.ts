@@ -3,11 +3,11 @@ import type { Product, ProductCategory } from "./traceabilityApi";
 const manualDate = "............";
 
 const zoneByCategory: Record<ProductCategory, string> = {
-  boulangerie: "PBC1",
-  cake: "PBC2",
-  patisserie: "PBC2",
-  beldi: "PBC3",
-  viennoiserie: "PBC4",
+  boulangerie: "PBC01",
+  cake: "PBC02",
+  patisserie: "PBC02",
+  beldi: "PBC03",
+  viennoiserie: "PBC04",
 };
 
 const codesByCategory: Record<ProductCategory, Record<string, string>> = {
@@ -38,6 +38,7 @@ const codesByCategory: Record<ProductCategory, Record<string, string>> = {
     "PAIN SEMOULE": "18",
     "PAIN SEMOULE S SEL": "19",
     "PAIN SEMOULE SANS SEL": "19",
+    "PATE SPECIAL": "PSP",
     "SANDWICH COMPLET": "20",
     "SANDWICHE COMPLET": "20",
     "SANDWICH OLIVES": "21",
@@ -55,49 +56,79 @@ const codesByCategory: Record<ProductCategory, Record<string, string>> = {
   },
   beldi: {
     FEKKAS: "01",
+    "FEKKAS SUCRE": "01",
+    "FEKKAS SUCRE GLACE": "01",
+    "FEKKAS PRESTIGE": "01P",
     "FEKKAS S SUCRE": "02",
+    "FEKKAS SANS SUCRE": "02",
     BAHLA: "03",
+    BEHLA: "03",
+    "BAHLA MINI": "03m",
+    "BEHLA MINI": "03m",
     "M7ANCHA HACHEE": "04",
-    "MHENCHA NORMAL": "04",
+    "MHENCHA HACHEE": "04",
     RICHBOND: "05",
     SBANI: "06",
+    SBANNI: "06",
     "SBANNI GR": "06",
+    "SEBBANI GR": "06",
     "SBANI BOITE": "06b",
     "SEBBANI BOITES": "06b",
     "SBANI PLATEAU": "06",
     "GHRIBA EFFILEE CAFE": "GEC",
     "GHRIBA EFFILEES CAFE": "GEC",
+    "GHRAIBA EFFILEE CAFE": "GEC",
     "CORNE DE GAZELLE": "07",
-    "CORNE DE GAZELLE BLUE": "07",
-    "CORNE DE GAZELLE BLUE INDIGO": "07",
-    "CORNE DE GAZELLE ROUGE": "07",
-    "CORNE DE GAZELLE NOIR": "07",
+    "CORNE GAZELLE": "07",
+    "GHRIBA EFFILEE": "08",
     "GHRIBA EFFILEES": "08",
     "GHRIBA EFILLEES": "08",
+    "GHRAIBA EFFILEE": "08",
     "COOKIES DROPS": "09",
     "COOKIES DROPSS": "09",
     GARGA3A: "10",
     "M7ANCHA AMANDE": "11",
+    "MHENCHA AMANDE": "11",
     "GHRIBA SUCRE GLACE": "12",
     DIAMANTINE: "13",
     "SABLE DIAMANTINE": "13",
     BAKLAVA: "14",
-    "M7ANCHA LOUZ": "15",
-    "MHENCHA AMANDE": "15",
-    "MHENCHA PRALINE AMANDE": "15",
+    "M7ANCHA PISTACHE": "15",
+    "MHENCHA PISTACHE": "15",
     "COOKIES DROPS PISTACHE": "16",
     "RAFFAELLO COCO": "RC",
+    "RAFFAELO COCO": "RC",
     "RAFAELLO COCO": "RC",
     "RAFFAELLO KUNAFA": "RK",
+    "RAFFAELO KUNAFA": "RK",
     "RAFAELLO KOUNAFA": "RK",
+    "RAFFAELLO KOUNAFA": "RK",
+    "RAFFAELO KOUNAFA": "RK",
     CHAHDA: "CH",
     "SABLE CARAMEL": "SC",
+    "SABLEE CARAMEL": "SC",
     "SABLE PISTACHE": "SP",
+    "SABLEE PISTACHE": "SP",
     "SABLE CAFE": "SCF",
     "SABLE CITRON": "SCi",
+    "SABLEE CITRON": "SCi",
     "TARTE FRUIT SECS": "TFS",
+    "MHENCHA PATE BASTILLE": "MPB",
+    "GHRAIBA EFFILEE NOIX": "GEN",
+    "BISCUIT SALE": "BS",
   },
   viennoiserie: {
+    "PATE BEIGNETS DONUTS": "PBD",
+    "PATE MF": "PMF",
+    "PATE VIENNOI": "PV",
+    "PATE VIENNOISERIE": "PV",
+    "PATE VIENOISERIE": "PV",
+    "PATE VIENNOIS": "PV",
+    "PATE AMANDE": "PA",
+    "PATE FEILLTAGE": "PF",
+    "PATE FEUILLETAGE": "PF",
+    "CREME AMANDE": "CA",
+    "CREME PATISSERIE": "CP",
     "PAIN CHOCOLAT": "01",
     "CROISSANT SIMPLE": "02",
     "CROISSANT SIMPLE PATE AMANDE": "03",
@@ -181,8 +212,11 @@ const codesByCategory: Record<ProductCategory, Record<string, string>> = {
     "MADELEINE CHOCOLAT": "29",
     "MILLE FEUILLE VANILLE": "22",
     "MILLE FEUILLE CHOCOLAT": "22",
+    "CAKE AMR NOUGA": "23",
+    "CAKE AMR NOUGAT": "23",
     "FERRERO AMERICAN CAKE": "23",
     "NOUGA AMERICAN CAKE": "23",
+    "NOUGAT AMERICAN CAKE": "23",
     "NUTELLA AMERICAIN CAKE": "23",
     "TARTE AMANDE": "37",
     "TARTE CHOCOLAT": "37",
@@ -195,15 +229,261 @@ const codesByCategory: Record<ProductCategory, Record<string, string>> = {
   },
 };
 
+const pbc2SemiFinishedCodes: Record<string, string> = {
+  "MOUSSE PRALINE": "PR",
+  "MOUSSE BLANC": "MB",
+  "MOUSSE NOIRE": "MN",
+  "MOUSSE AU LAIT": "ML",
+  "MOUSSE NOISETTE": "MNO",
+  "MOUSSE CITRON": "MC",
+  "MOUSSE TARTE SOLEILE": "MTS",
+  "MOUSSE TARTE SOLEIL": "MTS",
+  "MOUSSE CAFE": "MCF",
+  "MOUSSE MANGUE": "MM",
+  "MOUSSE CHEESECAKE MANGUE": "MCCM",
+  "MOUSSE FROMAGE CHEESECAKE MERTIL": "MFCCM",
+  "MOUSSE FROMAGE CHEESECAKE MYRTILLE": "MFCCM",
+  "MOUSSE CHEESECAKE MYRTIL": "MCCMY",
+  "MOUSSE CHEESECAKE MYRTILLE": "MCCMY",
+  "MOUSSE PINACOULADA": "MP",
+  "MOUSSE PINACOLADA": "MP",
+  "MOUSSE ORANGE": "MO",
+  "MOUSSE FRAMBOISE": "MFR",
+  "MOUSSE YOGHOURT": "MY",
+  "MOUSSE YAOURT": "MY",
+  "MOUSSE ABRICOT": "MA",
+  "MOUSSE POIRE": "MP",
+  "MOUSSE ENTR MANGE PASSION": "MEMP",
+  "MOUSSE ENTREMET MANGUE PASSION": "MEMP",
+  "MOUSSE PRALINEE": "MPR",
+  "INSERT MANGUE": "LM",
+  "L INSERT MANGUE": "LM",
+  "INSERT ORANGE": "LO",
+  "L INSERT ORANGE": "LO",
+  "INSERT PINACOLADA": "LP",
+  "L INSERT PINACOLADA": "LP",
+  "INCERT CITRON": "LC",
+  "INSERT CITRON": "LC",
+  "L INSERT CITRON": "LC",
+  "INSERT FRAMBOISE": "LF",
+  "L INSERT FRAMBOISE": "LF",
+  "INSERT PECHE": "LPe",
+  "L INSERT PECHE": "LPe",
+  "INSERT POIRE": "LPO",
+  "L INSERT POIRE": "LPO",
+  MERINGUE: "MRG",
+  "MOUSSE PRALINE AMANDE": "MPA",
+  "CREMEUX CHOCOLAT VANILLE": "CCV",
+  "CREMEUX CARAMEL": "CCA",
+  "CREMEUX EXOTIQUE": "CE",
+  "CREMEUX PASSION": "CRP",
+  "COULIS FRAMBOISE": "COF",
+  "COULIS PASSION": "COP",
+  "CREMEUX CHOCOLAT": "CRCH",
+  "CREMEUX CITRON": "CRCI",
+  "COULIS CHOCO BANANE": "COCB",
+  "COULIS CHOCOLAT": "COCH",
+  "COULIS COCE": "COC",
+  "COULIS COCO": "COC",
+  "COULIS ENTREMET FRAMBOISE": "CEFR",
+  "COULIS GATEAU BANANE": "CGT",
+  CARAMEL: "CAR",
+  "MOUSSE FROMAGE": "MF",
+  "MOUSSE VANILLE": "MV",
+  "CREMEUX PISTACHE": "CRP",
+  "APPAREILLE MADELIN": "AM",
+  "APPAREIL MADELEINE": "AM",
+  "APPAREILLE FINANCIER": "AF",
+  "APPAREIL FINANCIER": "AF",
+  "APPARAILLE CAKE GR CHOCOLAT": "ACGC",
+  "APPAREIL CAKE GR CHOCOLAT": "ACGC",
+  "APPARAILLE CAKE GR VANILLE": "ACGV",
+  "APPAREIL CAKE GR VANILLE": "ACGV",
+  "APPARAILLE CAKE ROYALE": "ACR",
+  "APPAREIL CAKE ROYALE": "ACR",
+  "APPAREILLE FONDANT CHOCO": "AFC",
+  "APPAREIL FONDANT CHOCO": "AFC",
+  "ENTREMET CAKE AMR CAROTTE": "25SF",
+  "ENTREMET CAKE AMR NOUGA": "23-3-SF",
+  "ENTREMET CAKE AMR NOUGAT": "23-3-SF",
+  "ENTREMET CAKE AMR FERRERO": "23-1-SF",
+  "ENTREMET CAKE AMR NUTELLA": "23-2-SF",
+  "NOUGA AMANDE": "NGA",
+  "NOUGAT AMANDE": "NGA",
+  "NOUGA PISTACHE": "NP",
+  "NOUGAT PISTACHE": "NP",
+  "ENTREMET NOIRE": "EN",
+  "ENTREMET BLANC": "EB",
+  "ENTREMET PISTACHE": "EP",
+  "FONDO CHOCOLAT MONTAGE": "30SF",
+  "FONDANT CHOCOLAT MONTAGE": "30SF",
+  "CREME TARTE CITRON": "CTC",
+  "CREME TARTE MANGE PASSION": "CTMP",
+  "CREME TARTE MANGUE PASSION": "CTMP",
+  "CREME TARTE TATIN POMME": "CTTP",
+  "CREME VANILLE": "CV",
+  "BISCUIT CAKE DATTES": "BCD",
+  "BISCUIT HONEY CAKE": "BHC",
+  "BISCUIT JOCONDE BLANC": "BJB",
+  "BISCUIT JOCONDE NOIRE": "BJN",
+  "BISCUIT NOIRE": "BNO",
+  "BISCUIT JOCONDE PISTACHE": "BJP",
+  "BISCUIT CARAMEL": "BC",
+  "BISCUIT CAKE AMR": "BCA",
+  "BISCUIT CAKE AMR CAROTTE": "BCAC",
+  "BISCUIT SANS FARINE": "BSF",
+  "BISCUIT CAFE": "BCF",
+  "BISCUIT PAVOT": "BIP",
+  "BISCUIT COOKIES": "BICO",
+  "BISCUIT 3CHOCOLAT": "B3C",
+  "BISCUIT 3 CHOCOLAT": "B3C",
+  "BISCUIT TROPICAL": "BTR",
+  "PATE POP CAKE": "36SF",
+  "PATE AMANDE": "PA",
+  "PATE SABLE": "PS",
+  "PATE SABLE ROUGE": "PSR",
+  "PATE CHOW": "PC",
+  "PATE CHOUX": "PC",
+  "PATE COOKIES GR FRAMBOISE": "PCGF",
+  "PATE COOKIES GR NOISETTE": "PCGN",
+  "PATE COOKIES GR CHOCOLAT": "PCGC",
+  "PATE COOKIES GR PISTACHE": "PCGP",
+  "CADRE OPERA": "1SF",
+  "CADRE MACARON PRALINE": "2SF",
+  "CADRE TROPICAL": "3SF",
+  "CADRE YAOURT": "4SF",
+  "CADRE NOISIOLA": "5SF",
+  "CADRE TROIS CHOCOLAT": "6SF",
+  "CADRE FORET NOIRE": "7SF",
+  "CADRE RED VELVET": "9SF",
+  "CADRE BISCUIT PAVOT": "10SF",
+  "CADRE TIRAMISU": "11SF",
+  "CADRE BROWNIE NOISETTE": "32SF",
+  "MACRON PRALINE": "44SF",
+  "MACARON PRALINE": "44SF",
+  "COULIS TROPICALE": "CT",
+  "COULIS TROPICAL": "CT",
+  "MOUSSE TROPICALE": "MT",
+  "MOUSSE TROPICAL": "MT",
+  "MOUSSE TIRAMISU": "MtR",
+  "SIROP CITRON": "SC",
+  "SIROP CAFE": "scf",
+  "COLIS YAOURT": "CY",
+  "COULIS YAOURT": "CY",
+  "COLIS SOLEIL": "CS",
+  "COULIS SOLEIL": "CS",
+  "SILICONE MANGUE": "SIM",
+  "SILICONE CITRON": "SIC",
+  "GANACHE BLANC VANILLE": "GBV",
+  "GLACAGE MANGUE": "GMA",
+  "GLACAGE VANILLE": "GV",
+  "INSERT TROMPE L OEIL FRAMBOISE": "LTLF",
+  "L INSERT TROMPE L OEIL FRAMBOISE": "LTLF",
+  "KONAFA PISTACHE": "KPI",
+  "COULIS TROMPE L OEIL FRAMBOISE": "CTOF",
+  "COULIS TROMPE L OEIL MANGUE PASSION": "CTOMP",
+  "SILICONE TROPE L OEIL CHARLOTTE": "STOC",
+  "SILICONE TROMPE L OEIL CHARLOTTE": "STOC",
+  "SILICONE TROPE L OEIL PANIER": "STOP",
+  "SILICONE TROMPE L OEIL PANIER": "STOP",
+};
+
+const beldiSemiFinishedCodes: Record<string, string> = {
+  "PATE SABLEE": "PS",
+  "PATE SABLE": "PS",
+  "PATE AMANDE": "PA",
+  "PATE DATTES": "PD",
+  "PATE BAHLA S GLACE": "PBS",
+  "PATE GHRAIBA SUCRE GLACE": "PGS",
+  "PATE CORNE GAZELLE": "PCG",
+  "PRALINE AMANDE": "PRA",
+  "PRALINER AMANDE": "PRA",
+  "PRALINE PISTACHE": "PRP",
+  "PRALINER PISTACHE": "PRP",
+  "PATE DIAMANTINE": "PD",
+  "NOUGAT SESAME": "NGS",
+  "NOUGA SESAME": "NGS",
+  "NOUGAT EFFILE": "NGE",
+  "NOUGA EFFILE": "NGE",
+  "PATE GARGA3A": "PG",
+  "PATE GHRAIBA EFFILEE": "PGEF",
+  "PATE SEBBANI": "PSb",
+  "PATE SBANNI": "PSb",
+  "PATE MHENCHA AMANDE": "PMA",
+  "PATE BAKLAVA": "PB",
+  "PATE RAFFAELLO COCO": "PRF",
+  "PATE RAFFAELO COCO": "PRF",
+  "PATE RAFFAELLO KUNAFA": "PRF",
+  "PATE RAFFAELO KUNAFA": "PRF",
+  "PATE RAFFAELLO": "PRF",
+  "PATE RAFFELO": "PRF",
+  "PATE RAFFAELO": "PRF",
+  "GANACHE CITRON": "GCi",
+  "GANACHE PISTACHE": "GP",
+  "GANACHE CARAMEL": "PR-GCR",
+  "GANACHE CHOCO CAFE": "GCC",
+  "PATE RICHBOND": "PR",
+  "PATE CHAHDA": "PCH",
+  "NOUGAT HACHE": "NH",
+  "NOUGA HACHE": "NH",
+  "FARCE BAKLAVA": "FB",
+  "PATE MHENCHA PISTACHE": "PMP",
+  "PATE NOIX": "PN",
+};
+
 export function generateProductionLotNumber(product: Product | null, productionDate: string) {
-  if (!product?.category) return "";
-  const zone = zoneByCategory[product.category];
-  const code = codeForProduct(product.category, product.name) ?? "??";
-  return `${zone}${code}-${dateSuffix(productionDate) ?? manualDate}`;
+  const codification = resolveProductionLotCodification(product);
+  if (!codification) return "";
+  return formatProductionLotNumber(codification.zone, codification.code, dateSuffix(productionDate) ?? manualDate);
 }
 
-function codeForProduct(category: ProductCategory, name: string) {
-  return codesByCategory[category][normalizeCodeKey(name)];
+export function resolveProductionLotCodification(product: Product | null) {
+  if (!product || product.type === "raw") return null;
+  const zone = product.lotZone?.trim() || (product.category ? zoneByCategory[product.category] : "");
+  const code = product.lotCode?.trim() || codeForProduct(product);
+  if (!zone || !code) return null;
+  return { zone, code };
+}
+
+function formatProductionLotNumber(zone: string, code: string, suffix: string) {
+  const normalizedZone = normalizeLotZone(zone);
+  const normalizedCode = code.trim().replace(/\s+/g, "").replace(/^-+|-+$/g, "");
+  if (!normalizedZone || !normalizedCode) return "";
+  return `${normalizedZone}-${normalizedCode}-${suffix}`;
+}
+
+function normalizeLotZone(zone: string) {
+  const compactZone = zone.trim().toUpperCase().replace(/\s+/g, "").replace(/-/g, "");
+  const pbcZone = compactZone.match(/^PBC(\d{1,2})$/);
+  if (pbcZone) return `PBC${pbcZone[1].padStart(2, "0")}`;
+
+  const numericZone = compactZone.match(/^(\d{1,2})$/);
+  if (numericZone) return `PBC${numericZone[1].padStart(2, "0")}`;
+
+  return compactZone.replace(/^-+|-+$/g, "");
+}
+
+function codeForProduct(product: Product) {
+  const category = product.category;
+  if (!category) return undefined;
+  const key = normalizeCodeKey(product.name);
+  if (product.type === "semi_finished" && category === "beldi") {
+    return beldiSemiFinishedCodes[key] ?? codesByCategory[category][key] ?? codeFromImportedProductCode(product);
+  }
+  return (
+    codesByCategory[category][key]
+    ?? (product.type === "semi_finished" && (category === "cake" || category === "patisserie") ? pbc2SemiFinishedCodes[key] : undefined)
+    ?? codeFromImportedProductCode(product)
+  );
+}
+
+function codeFromImportedProductCode(product: Product) {
+  if (!product.category || product.type === "raw") return undefined;
+  const typePrefix = product.type === "finished" ? "PF" : "SF";
+  const prefix = `${typePrefix}-${product.category.toUpperCase()}-CODE-`;
+  if (!product.code.startsWith(prefix)) return undefined;
+  const encodedCode = product.code.slice(prefix.length).replace(/-[A-F0-9]{6}$/i, "");
+  return encodedCode || undefined;
 }
 
 function dateSuffix(value: string) {

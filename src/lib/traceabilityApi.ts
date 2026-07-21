@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { formatFrenchDate, formatFrenchDateTime } from "./dateFormat";
 
 export type ProductType = "raw" | "semi_finished" | "finished";
 export type ProductCategory = "beldi" | "boulangerie" | "cake" | "patisserie" | "viennoiserie";
@@ -14,6 +15,9 @@ export type Product = {
   unit: string;
   recipeStatus: RecipeStatus;
   componentCount: number;
+  componentNames: string[];
+  lotZone: string | null;
+  lotCode: string | null;
   lastUpdated: string;
 };
 
@@ -139,6 +143,7 @@ export type ReceptionInput = {
 };
 
 export type ReceptionBatchLineInput = {
+  id?: string;
   productId: string;
   supplierLot: string;
   quantity: number;
@@ -155,6 +160,11 @@ export type ReceptionBatchInput = {
   receptionDate: string;
   observations: string | null;
   lines: ReceptionBatchLineInput[];
+};
+
+export type ReceptionBatchUpdateInput = ReceptionBatchInput & {
+  batchId: string;
+  mergedBatchIds: string[];
 };
 
 export type FabricationInput = {
@@ -183,6 +193,7 @@ export type ProductionBatch = {
   status: "draft" | "validated" | "cancelled";
   observations: string | null;
   consumedLotCount: number;
+  traceabilitySnapshot: ProductionTraceabilitySnapshot | null;
   createdAt: string;
 };
 
@@ -202,11 +213,68 @@ export type ProductionConsumptionDetail = {
   linkedAt: string;
 };
 
+export type ProductionTraceabilityLot = {
+  lotId: string;
+  lotNumber: string;
+  supplierLot: string | null;
+  sourceType: "reception" | "fabrication";
+  lotCreatedAt: string;
+};
+
+export type ProductionTraceabilityNode = {
+  nodeId: string;
+  parentNodeId: string;
+  productId: string;
+  productName: string;
+  productType: ProductType;
+  depth: number;
+  lots: ProductionTraceabilityLot[];
+};
+
+export type ProductionTraceabilitySnapshot = {
+  version: 1;
+  root: {
+    productId: string;
+    productName: string;
+    productType: Exclude<ProductType, "raw">;
+    lotNumber: string;
+  };
+  components: ProductionTraceabilityNode[];
+  diagram: {
+    nodes: SchemaDiagramNode[];
+    edges: SchemaDiagramEdge[];
+    viewport: SchemaDiagramViewport | null;
+  };
+};
+
+function parseProductionTraceabilitySnapshot(value: unknown): ProductionTraceabilitySnapshot | null {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.root) || !Array.isArray(value.components) || !isRecord(value.diagram)) {
+    return null;
+  }
+
+  const root = value.root;
+  if (
+    typeof root.productId !== "string" ||
+    typeof root.productName !== "string" ||
+    (root.productType !== "finished" && root.productType !== "semi_finished") ||
+    typeof root.lotNumber !== "string"
+  ) {
+    return null;
+  }
+
+  return value as unknown as ProductionTraceabilitySnapshot;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export type AvailableLotOption = {
   id: string;
   productId: string;
   lotNumber: string;
   supplierLot: string | null;
+  supplierName: string | null;
   sourceType: "reception" | "fabrication";
   createdAt: string;
 };
@@ -224,7 +292,14 @@ export type ProductionTraceabilityInput = {
 export type ProductCatalogInput = {
   name: string;
   type: Exclude<ProductType, "raw">;
+  category?: ProductCategory;
   lotNumber: string;
+};
+
+export type ProductCatalogUpdateInput = {
+  name: string;
+  type: ProductType;
+  unit?: string;
 };
 
 export function formatApiError(error: unknown, fallback: string) {
@@ -251,35 +326,58 @@ function isMissingColumnError(error: unknown, column: string) {
 export async function fetchProductCatalog(): Promise<Product[]> {
   if (!supabase) return [];
 
+  const fullSelect = "id, code, name, type, category, unit, recipe_status, component_count, updated_at, lot_zone, lot_code";
+  const categorySelect = "id, code, name, type, category, unit, recipe_status, component_count, updated_at";
+  const legacySelect = "id, code, name, type, unit, recipe_status, component_count, updated_at";
   let { data, error } = await supabase
     .from("product_catalog")
-    .select("id, code, name, type, category, unit, recipe_status, component_count, updated_at")
+    .select(fullSelect)
     .order("type")
     .order("name");
+
+  if (error && (isMissingColumnError(error, "lot_zone") || isMissingColumnError(error, "lot_code"))) {
+    const fallback = await supabase
+      .from("product_catalog")
+      .select(categorySelect)
+      .order("type")
+      .order("name");
+    data = fallback.data?.map((row) => ({ ...row, lot_zone: null, lot_code: null })) ?? null;
+    error = fallback.error;
+  }
 
   if (error && isMissingColumnError(error, "category")) {
     const fallback = await supabase
       .from("product_catalog")
-      .select("id, code, name, type, unit, recipe_status, component_count, updated_at")
+      .select(legacySelect)
       .order("type")
       .order("name");
-    data = fallback.data?.map((row) => ({ ...row, category: null })) ?? null;
+    data = fallback.data?.map((row) => ({ ...row, category: null, lot_zone: null, lot_code: null })) ?? null;
     error = fallback.error;
   }
 
   if (error) throw error;
 
-  return (data ?? []).map((row) => ({
-    id: row.id,
-    code: row.code,
-    name: row.name,
-    type: row.type,
-    category: row.category,
-    unit: row.unit,
-    recipeStatus: row.recipe_status,
-    componentCount: row.component_count ?? 0,
-    lastUpdated: row.updated_at,
-  }));
+  const componentNamesByTargetId = await fetchProductComponentNamesByTargetId();
+
+  return (data ?? []).map((row) => mapProductCatalogRow(row, componentNamesByTargetId[row.id] ?? []));
+}
+
+async function fetchProductComponentNamesByTargetId(): Promise<Record<string, string[]>> {
+  try {
+    const rows = await fetchAllProductSchemaComponentRows();
+    const namesByTargetId: Record<string, string[]> = {};
+
+    for (const row of rows) {
+      const currentNames = namesByTargetId[row.target_product_id] ?? [];
+      if (!currentNames.includes(row.component_name)) currentNames.push(row.component_name);
+      namesByTargetId[row.target_product_id] = currentNames;
+    }
+
+    return namesByTargetId;
+  } catch (error) {
+    logDevWarning("Product component filter metadata load skipped", error);
+    return {};
+  }
 }
 
 export async function fetchLotStockPreview(productIds?: string[]): Promise<Record<string, LotStockPreview>> {
@@ -334,18 +432,7 @@ export async function fetchLotStockPreview(productIds?: string[]): Promise<Recor
 export async function fetchProductSchema(productId: string): Promise<ProductSchemaNode[]> {
   if (!supabase || !productId) return [];
 
-  const { data, error } = await supabase
-    .from("product_schema_components")
-    .select(
-      "target_product_id, component_product_id, component_code, component_name, component_type, component_unit, component_recipe_status, component_count",
-    );
-
-  if (error) {
-    if (error.code === "PGRST205" || error.message.includes("product_schema_components")) return [];
-    throw error;
-  }
-
-  const rows = data ?? [];
+  const rows = await fetchAllProductSchemaComponentRows();
   const stockByProductId = await fetchLotStockPreview([...new Set(rows.map((row) => row.component_product_id))]);
   const rowsByTarget = new Map<string, typeof rows>();
 
@@ -356,7 +443,11 @@ export async function fetchProductSchema(productId: string): Promise<ProductSche
   }
 
   function buildChildren(targetId: string, visitedIds: Set<string>): ProductSchemaNode[] {
-    return (rowsByTarget.get(targetId) ?? []).map((row) => {
+    const seenComponentIds = new Set<string>();
+    return (rowsByTarget.get(targetId) ?? []).flatMap((row) => {
+      if (seenComponentIds.has(row.component_product_id)) return [];
+      seenComponentIds.add(row.component_product_id);
+
       const nextVisitedIds = new Set(visitedIds);
       nextVisitedIds.add(row.component_product_id);
 
@@ -365,10 +456,13 @@ export async function fetchProductSchema(productId: string): Promise<ProductSche
         code: row.component_code,
         name: row.component_name,
         type: row.component_type,
-        category: null,
+        category: row.component_category,
         unit: row.component_unit,
         recipeStatus: row.component_recipe_status,
         componentCount: row.component_count ?? 0,
+        componentNames: [],
+        lotZone: row.component_lot_zone ?? null,
+        lotCode: row.component_lot_code ?? null,
         lastUpdated: "",
         stock: stockByProductId[row.component_product_id] ?? null,
         children:
@@ -377,11 +471,54 @@ export async function fetchProductSchema(productId: string): Promise<ProductSche
             : [],
       };
 
-      return component;
+      return [component];
     });
   }
 
   return buildChildren(productId, new Set([productId]));
+}
+
+async function fetchAllProductSchemaComponentRows(includeCodification = true) {
+  if (!supabase) return [];
+
+  const pageSize = 1_000;
+  const rows: {
+    target_product_id: string;
+    component_product_id: string;
+    component_code: string;
+    component_name: string;
+    component_type: ProductType;
+    component_category: ProductCategory | null;
+    component_unit: string;
+    component_recipe_status: RecipeStatus;
+    component_count: number | null;
+    component_lot_zone?: string | null;
+    component_lot_code?: string | null;
+  }[] = [];
+
+  const baseSelect =
+    "target_product_id, component_product_id, component_code, component_name, component_type, component_category, component_unit, component_recipe_status, component_count";
+  const fullSelect = `${baseSelect}, component_lot_zone, component_lot_code`;
+
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("product_schema_components")
+      .select(includeCodification ? fullSelect : baseSelect)
+      .range(from, from + pageSize - 1);
+
+    if (error) {
+      if (error.code === "PGRST205" || error.message.includes("product_schema_components")) return [];
+      if (includeCodification && (isMissingColumnError(error, "component_lot_zone") || isMissingColumnError(error, "component_lot_code"))) {
+        return fetchAllProductSchemaComponentRows(false);
+      }
+      throw error;
+    }
+
+    rows.push(...((data ?? []) as unknown as Array<(typeof rows)[number]>));
+    if (!data || data.length < pageSize) break;
+  }
+
+  return rows;
 }
 
 export async function fetchProductSchemaDiagram(productId: string): Promise<ProductSchemaDiagram> {
@@ -390,7 +527,7 @@ export async function fetchProductSchemaDiagram(productId: string): Promise<Prod
   try {
     components = await fetchProductSchema(productId);
   } catch (error) {
-    console.warn("Product schema components load skipped", error);
+    logDevWarning("Product schema components load skipped", error);
   }
 
   if (!supabase || !productId) {
@@ -449,24 +586,59 @@ export async function fetchProductSchemaDiagram(productId: string): Promise<Prod
 async function fetchProductCatalogByIds(productIds: string[]): Promise<Product[]> {
   if (!supabase || productIds.length === 0) return [];
 
-  const { data, error } = await supabase
+  const fullSelect = "id, code, name, type, category, unit, recipe_status, component_count, updated_at, lot_zone, lot_code";
+  const categorySelect = "id, code, name, type, category, unit, recipe_status, component_count, updated_at";
+  const legacySelect = "id, code, name, type, unit, recipe_status, component_count, updated_at";
+  let { data, error } = await supabase
     .from("product_catalog")
-    .select("id, code, name, type, unit, recipe_status, component_count, updated_at")
+    .select(fullSelect)
     .in("id", productIds);
+
+  if (error && (isMissingColumnError(error, "lot_zone") || isMissingColumnError(error, "lot_code"))) {
+    const fallback = await supabase.from("product_catalog").select(categorySelect).in("id", productIds);
+    data = fallback.data?.map((row) => ({ ...row, lot_zone: null, lot_code: null })) ?? null;
+    error = fallback.error;
+  }
+
+  if (error && isMissingColumnError(error, "category")) {
+    const fallback = await supabase.from("product_catalog").select(legacySelect).in("id", productIds);
+    data = fallback.data?.map((row) => ({ ...row, category: null, lot_zone: null, lot_code: null })) ?? null;
+    error = fallback.error;
+  }
 
   if (error) throw error;
 
-  return (data ?? []).map((row) => ({
+  return (data ?? []).map((row) => mapProductCatalogRow(row, []));
+}
+
+function mapProductCatalogRow(row: {
+  id: string;
+  code: string;
+  name: string;
+  type: ProductType;
+  category?: ProductCategory | null;
+  unit: string;
+  recipe_status: RecipeStatus;
+  component_count: number | null;
+  componentNames?: string[];
+  updated_at: string;
+  lot_zone?: string | null;
+  lot_code?: string | null;
+}, componentNames: string[]): Product {
+  return {
     id: row.id,
     code: row.code,
     name: row.name,
     type: row.type,
-    category: null,
+    category: row.category ?? null,
     unit: row.unit,
     recipeStatus: row.recipe_status,
     componentCount: row.component_count ?? 0,
+    componentNames,
+    lotZone: row.lot_zone ?? null,
+    lotCode: row.lot_code ?? null,
     lastUpdated: row.updated_at,
-  }));
+  };
 }
 
 export async function saveProductSchema(
@@ -635,20 +807,29 @@ export async function fetchReceptionBatchLines(batchId: string): Promise<Recepti
 export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
   if (!supabase) return [];
 
-  const { data, error } = await supabase
+  const historyColumns =
+    "id, production_date, product_id, product_code, product_name, product_type, product_category, generated_lot, responsible_name, operation, status, observations, consumed_lot_count, created_at";
+  let { data, error } = await supabase
     .from("production_batch_history")
-    .select(
-      "id, production_date, product_id, product_code, product_name, product_type, product_category, generated_lot, responsible_name, operation, status, observations, consumed_lot_count, created_at",
-    )
-    .order("production_date", { ascending: false })
+    .select(`${historyColumns}, traceability_snapshot`)
     .order("created_at", { ascending: false });
+  let historyRows = (data ?? []) as Array<Record<string, any>>;
+
+  if (error && (error.code === "42703" || error.code === "PGRST204" || error.message.includes("traceability_snapshot"))) {
+    const fallback = await supabase
+      .from("production_batch_history")
+      .select(historyColumns)
+      .order("created_at", { ascending: false });
+    historyRows = (fallback.data ?? []) as Array<Record<string, any>>;
+    error = fallback.error;
+  }
 
   if (error) {
     if (error.code === "PGRST205" || error.message.includes("production_batch_history")) return [];
     throw error;
   }
 
-  return (data ?? []).map((row) => ({
+  return historyRows.map((row) => ({
     id: row.id,
     productionDate: row.production_date,
     productId: row.product_id,
@@ -662,6 +843,7 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
     status: row.status,
     observations: row.observations,
     consumedLotCount: row.consumed_lot_count ?? 0,
+    traceabilitySnapshot: parseProductionTraceabilitySnapshot("traceability_snapshot" in row ? row.traceability_snapshot : null),
     createdAt: row.created_at,
   }));
 }
@@ -704,7 +886,7 @@ export async function fetchAvailableLotsForProduct(productId: string, limit = 3)
 
   const { data, error } = await supabase
     .from("lots")
-    .select("id, product_id, lot_number, supplier_lot, source_type, created_at")
+    .select("id, product_id, lot_number, supplier_lot, source_type, created_at, supplier:suppliers(name)")
     .eq("product_id", productId)
     .eq("lot_status", "available")
     .eq("quality_status", "conforme")
@@ -718,6 +900,7 @@ export async function fetchAvailableLotsForProduct(productId: string, limit = 3)
     productId: row.product_id,
     lotNumber: row.lot_number,
     supplierLot: row.supplier_lot,
+    supplierName: extractJoinedSupplierName(row.supplier),
     sourceType: row.source_type,
     createdAt: row.created_at,
   }));
@@ -740,6 +923,19 @@ export async function createProductionWithTraceability(input: ProductionTraceabi
   return data as string;
 }
 
+export async function deleteProductionBatches(batchIds: string[]) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+
+  const uniqueBatchIds = [...new Set(batchIds)].filter(Boolean);
+  if (uniqueBatchIds.length === 0) return;
+
+  const { error } = await supabase.rpc("delete_production_batches", {
+    p_batch_ids: uniqueBatchIds,
+  });
+
+  if (error) throw error;
+}
+
 export async function fetchSupplierRawMaterialCatalog(supplierId: string): Promise<Product[]> {
   if (!supabase || !supplierId) return [];
 
@@ -760,6 +956,9 @@ export async function fetchSupplierRawMaterialCatalog(supplierId: string): Promi
     unit: row.unit,
     recipeStatus: "not_required",
     componentCount: 0,
+    componentNames: [],
+    lotZone: null,
+    lotCode: null,
     lastUpdated: row.updated_at,
   }));
 }
@@ -807,6 +1006,33 @@ export async function createReceptionBatch(input: ReceptionBatchInput): Promise<
     p_reception_date: input.receptionDate,
     p_observations: input.observations,
     p_lines: input.lines.map((line) => ({
+      product_id: line.productId,
+      supplier_lot: line.supplierLot,
+      quantity: line.quantity,
+      unit: line.unit,
+      expiry_date: line.expiryDate,
+      transport_temperature_c: line.transportTemperatureC,
+      temperature_status: line.temperatureStatus,
+      hygiene_status: line.hygieneStatus,
+      observations: line.observations,
+    })),
+  });
+
+  if (error) throw error;
+  return data as string;
+}
+
+export async function updateReceptionBatch(input: ReceptionBatchUpdateInput): Promise<string> {
+  if (!supabase) throw new Error("Supabase is not configured.");
+
+  const { data, error } = await supabase.rpc("update_raw_material_reception_batch", {
+    p_batch_id: input.batchId,
+    p_merged_batch_ids: input.mergedBatchIds,
+    p_supplier_id: input.supplierId,
+    p_reception_date: input.receptionDate,
+    p_observations: input.observations,
+    p_lines: input.lines.map((line) => ({
+      id: line.id ?? null,
       product_id: line.productId,
       supplier_lot: line.supplierLot,
       quantity: line.quantity,
@@ -901,6 +1127,7 @@ export async function createProductCatalogItem(input: ProductCatalogInput) {
       code: makeManufacturedProductCode(normalizedName, input.type),
       name: normalizedName,
       type: input.type,
+      category: input.category,
       unit: input.type === "finished" ? "unites" : "kg",
     })
     .select("id, unit")
@@ -928,6 +1155,52 @@ export async function createProductCatalogItem(input: ProductCatalogInput) {
 
 export async function createRawMaterialCatalogItem(input: RawMaterialInput) {
   return findOrCreateRawProduct(input.name, input.unit);
+}
+
+export async function updateProductCatalogItem(productId: string, input: ProductCatalogUpdateInput) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+
+  const normalizedName = input.name.trim();
+  if (!normalizedName) throw new Error("Product name is required.");
+
+  const nextUnit = input.type === "finished" ? "unites" : input.type === "semi_finished" ? "kg" : input.unit ?? "kg";
+  const { error } = await supabase
+    .from("products")
+    .update({
+      name: normalizedName,
+      type: input.type,
+      unit: nextUnit,
+    })
+    .eq("id", productId);
+
+  if (error) throw error;
+}
+
+export async function updateRawMaterialCatalogItem(productId: string, name: string, unit: string) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+  const normalizedName = name.trim();
+  const { error } = await supabase
+    .from("products")
+    .update({
+      name: normalizedName,
+      unit,
+      code: makeProductCode(normalizedName),
+    })
+    .eq("id", productId);
+
+  if (error) throw error;
+}
+
+export async function updateProductLotCodification(productId: string, lotZone: string, lotCode: string) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+
+  const { error } = await supabase.rpc("update_product_lot_codification", {
+    p_product_id: productId,
+    p_lot_zone: lotZone,
+    p_lot_code: lotCode,
+  });
+
+  if (error) throw error;
 }
 
 async function findOrCreateRawProduct(name: string, unit: string) {
@@ -1034,22 +1307,30 @@ function makeManufacturedProductCode(name: string, type: Exclude<ProductType, "r
   return `${type === "semi_finished" ? "SF" : "PF"}-${slug || "PRODUIT"}-${Date.now().toString(36).toUpperCase()}`;
 }
 
+function extractJoinedSupplierName(value: unknown) {
+  if (!value) return null;
+  const supplier = Array.isArray(value) ? value[0] : value;
+  if (!supplier || typeof supplier !== "object") return null;
+  const name = (supplier as { name?: unknown }).name;
+  return typeof name === "string" && name.trim() ? name : null;
+}
+
 function isSchemaViewport(value: unknown): value is SchemaDiagramViewport {
   if (!value || typeof value !== "object") return false;
   const viewport = value as Partial<SchemaDiagramViewport>;
   return typeof viewport.x === "number" && typeof viewport.y === "number" && typeof viewport.zoom === "number";
 }
 
+function logDevWarning(message: string, error: unknown) {
+  if (import.meta.env.DEV) {
+    console.warn(message, error);
+  }
+}
+
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat("fr-FR").format(new Date(value));
+  return formatFrenchDate(value);
 }
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("fr-FR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  return formatFrenchDateTime(value);
 }

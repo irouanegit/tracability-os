@@ -9,6 +9,9 @@ src-tauri/target/
 .env
 .env.local
 *.log
+tmp/
+__pycache__/
+*.pyc
 
 # OS/editor noise
 .DS_Store

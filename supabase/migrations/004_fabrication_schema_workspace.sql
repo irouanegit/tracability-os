@@ -20,6 +20,8 @@ alter table recipe_components add constraint recipe_components_quantity_positive
 create unique index if not exists recipe_components_recipe_component_idx
   on recipe_components (recipe_id, component_product_id);
 
+drop view if exists product_catalog cascade;
+
 create or replace view product_catalog as
 select
   p.id,

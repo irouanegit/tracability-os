@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import {
   Background,
   Controls,
-  Handle,
   MarkerType,
   MiniMap,
-  Position,
   ReactFlow,
   ReactFlowProvider,
   addEdge,
@@ -21,18 +19,24 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { DiagramProductCard } from "./DiagramProductCard";
+import { TraceabilityLoader } from "./TraceabilityLoader";
+import { filterByNameOrCode } from "./lib/productSearch";
 import {
   fetchLotStockPreview,
   fetchProductSchemaDiagram,
   formatApiError,
   saveProductSchemaDiagram,
+  updateProductLotCodification,
   type LotStockPreview,
   type Product,
+  type ProductSchemaNode,
   type ProductType,
   type RecipeStatus,
   type SchemaDiagramEdge,
   type SchemaDiagramNode,
 } from "./lib/traceabilityApi";
+import { resolveProductionLotCodification } from "./lib/productionLotCodification";
 
 type ProductNodeData = Record<string, unknown> & {
   product: Product;
@@ -44,7 +48,9 @@ type ProductFlowNode = Node<ProductNodeData, "product">;
 type ProductFlowEdge = Edge<Record<string, unknown>, "smoothstep">;
 type ConnectionCandidate = { source?: string | null; target?: string | null };
 type SelectionState = { type: "node"; id: string } | { type: "edge"; id: string } | null;
+type DeleteCandidate = { type: "node"; id: string; label: string; affectedNodeCount: number } | { type: "edge"; id: string; label: string; affectedNodeCount: 0 };
 type ProductSidebarFilter = "semi_finished" | "raw";
+type SchemaSaveTarget = { productId: string; componentProductIds: string[]; depth: number };
 
 const typeLabels: Record<ProductType, string> = {
   raw: "Matiere premiere",
@@ -63,32 +69,53 @@ const nodeTypes = {
 };
 
 const defaultViewport: Viewport = { x: 0, y: 0, zoom: 0.9 };
+const diagramLinkColor = "var(--diagram-link)";
+const DIAGRAM_COLUMN_GAP = 380;
+const DIAGRAM_ROW_GAP = 230;
+const DIAGRAM_TREE_GAP = 420;
+const DIAGRAM_NESTED_OFFSET = 70;
+
+type AutoLayoutBranch = {
+  component: ProductSchemaNode;
+  children: AutoLayoutBranch[];
+  leafSlots: number;
+};
 
 export function FabricationDiagramWorkspace({
   initialProduct,
+  initialProductSidebarCollapsed = false,
   products,
   onBack,
   onSchemaSaved,
 }: {
   initialProduct: Product | null;
+  initialProductSidebarCollapsed?: boolean;
   products: Product[];
   onBack: () => void;
   onSchemaSaved: () => Promise<void>;
 }) {
   return (
     <ReactFlowProvider>
-      <FabricationDiagramWorkspaceInner initialProduct={initialProduct} products={products} onBack={onBack} onSchemaSaved={onSchemaSaved} />
+      <FabricationDiagramWorkspaceInner
+        initialProduct={initialProduct}
+        initialProductSidebarCollapsed={initialProductSidebarCollapsed}
+        products={products}
+        onBack={onBack}
+        onSchemaSaved={onSchemaSaved}
+      />
     </ReactFlowProvider>
   );
 }
 
 function FabricationDiagramWorkspaceInner({
   initialProduct,
+  initialProductSidebarCollapsed,
   products,
   onBack,
   onSchemaSaved,
 }: {
   initialProduct: Product | null;
+  initialProductSidebarCollapsed: boolean;
   products: Product[];
   onBack: () => void;
   onSchemaSaved: () => Promise<void>;
@@ -96,29 +123,43 @@ function FabricationDiagramWorkspaceInner({
   const reactFlow = useReactFlow<ProductFlowNode, ProductFlowEdge>();
   const productById = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
   const initialTarget = initialProduct?.type === "raw" ? null : initialProduct;
+  const initialSelection = initialTarget ? ({ type: "node", id: initialTarget.id } as const) : null;
 
   const [targetProduct, setTargetProduct] = useState<Product | null>(initialTarget);
   const [productSearch, setProductSearch] = useState("");
   const [productFilter, setProductFilter] = useState<ProductSidebarFilter>("semi_finished");
-  const [isProductSidebarCollapsed, setIsProductSidebarCollapsed] = useState(false);
+  const [isProductSidebarCollapsed, setIsProductSidebarCollapsed] = useState(initialProductSidebarCollapsed);
   const [stockByProductId, setStockByProductId] = useState<Record<string, LotStockPreview>>({});
   const [nodes, setNodes, onNodesChange] = useNodesState<ProductFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<ProductFlowEdge>([]);
-  const [selected, setSelected] = useState<SelectionState>(initialTarget ? { type: "node", id: initialTarget.id } : null);
+  const selectedRef = useRef<SelectionState>(initialSelection);
+  const [selected, setSelectedState] = useState<SelectionState>(initialSelection);
   const [schemaStatus, setSchemaStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
+  const [deleteCandidate, setDeleteCandidate] = useState<DeleteCandidate | null>(null);
+  const [isCodificationPopoverOpen, setIsCodificationPopoverOpen] = useState(false);
+  const [codificationDraft, setCodificationDraft] = useState({ zone: "", code: "" });
+  const [codificationStatus, setCodificationStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
 
   const selectedNode = selected?.type === "node" ? nodes.find((node) => node.id === selected.id) ?? null : null;
   const selectedEdge = selected?.type === "edge" ? edges.find((edge) => edge.id === selected.id) ?? null : null;
+  const selectedCodificationProduct =
+    selectedNode && selectedNode.data.product.type !== "raw" ? selectedNode.data.product : null;
   const componentNodeCount = targetProduct ? nodes.filter((node) => !node.data.isTarget).length : 0;
-  const componentEdgeIds = getDirectComponentIds(targetProduct, nodes, edges);
+  const schemaSaveTargets = useMemo(() => buildSchemaSaveTargets(targetProduct, nodes, edges), [edges, nodes, targetProduct]);
+  const componentEdgeIds = schemaSaveTargets.find((target) => target.productId === targetProduct?.id)?.componentProductIds ?? [];
   const canSave = Boolean(targetProduct && componentEdgeIds.length > 0 && saveStatus !== "saving");
   const sidebarProducts = useMemo(() => {
     const filteredByType =
       productFilter === "semi_finished" ? products.filter((product) => product.type === "semi_finished") : products.filter((product) => product.type === "raw");
     return filterProducts(filteredByType, productSearch);
   }, [productFilter, productSearch, products]);
+
+  function selectSchemaItem(nextSelection: SelectionState) {
+    selectedRef.current = nextSelection;
+    setSelectedState(nextSelection);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -128,7 +169,7 @@ function FabricationDiagramWorkspaceInner({
         const nextStock = await fetchLotStockPreview(products.map((product) => product.id));
         if (!cancelled) setStockByProductId(nextStock);
       } catch (error) {
-        console.error("Lot stock preview load failed", error);
+        logDevError("Lot stock preview load failed", error);
       }
     }
 
@@ -160,13 +201,37 @@ function FabricationDiagramWorkspaceInner({
     if (!targetProduct) {
       setNodes([]);
       setEdges([]);
-      setSelected(null);
+      selectSchemaItem(null);
       setSchemaStatus("idle");
       return;
     }
 
     void loadTargetSchema(targetProduct);
   }, [targetProduct?.id]);
+
+  useEffect(() => {
+    if (!selectedCodificationProduct) {
+      setIsCodificationPopoverOpen(false);
+      setCodificationDraft({ zone: "", code: "" });
+      setCodificationStatus("idle");
+      return;
+    }
+
+    const resolvedCodification = resolveProductionLotCodification(selectedCodificationProduct);
+    setCodificationDraft({
+      zone: selectedCodificationProduct.lotZone ?? resolvedCodification?.zone ?? "",
+      code: selectedCodificationProduct.lotCode ?? resolvedCodification?.code ?? "",
+    });
+    setCodificationStatus("idle");
+  }, [
+    selectedCodificationProduct?.category,
+    selectedCodificationProduct?.code,
+    selectedCodificationProduct?.id,
+    selectedCodificationProduct?.lotCode,
+    selectedCodificationProduct?.lotZone,
+    selectedCodificationProduct?.name,
+    selectedCodificationProduct?.type,
+  ]);
 
   async function loadTargetSchema(product: Product) {
     setSchemaStatus("loading");
@@ -178,32 +243,35 @@ function FabricationDiagramWorkspaceInner({
       const schemaProductById = new Map(productById);
       schema.diagramProducts.forEach((schemaProduct) => schemaProductById.set(schemaProduct.id, schemaProduct));
       const restoredNodes = restoreDiagramNodes(product, schema.diagramNodes, schemaProductById, stockByProductId);
-      const baseNodes =
-        restoredNodes.length > 0 ? restoredNodes : buildDefaultDiagramNodes(product, schema.components, stockByProductId);
+      const hasSavedComponentLayout = restoredNodes.some((node) => !node.data.isTarget);
+      const autoLayoutDiagram = buildAutoLayoutDiagram(product, schema.components, stockByProductId);
+      const hasNestedComponentLayout = hasNestedSchemaComponents(schema.components);
+      const shouldUseSavedLayout = hasSavedComponentLayout && !hasNestedComponentLayout && !hasNodeOverlap(restoredNodes);
+      const baseNodes = shouldUseSavedLayout ? restoredNodes : autoLayoutDiagram.nodes;
       const baseNodeIds = new Set(baseNodes.map((node) => node.id));
       const baseEdges =
-        schema.diagramEdges.length > 0
+        shouldUseSavedLayout && schema.diagramEdges.length > 0
           ? restoreDiagramEdges(schema.diagramEdges, baseNodeIds)
-          : schema.components.map((component) => createProductEdge(product.id, createComponentNodeId(product.id, component.id)));
-      const expandedDiagram = await expandSavedSemiFinishedSchemas(baseNodes, baseEdges, product.id);
+          : autoLayoutDiagram.edges;
+      const expandedDiagram = shouldUseSavedLayout ? await expandSavedSemiFinishedSchemas(baseNodes, baseEdges, product.id) : { nodes: baseNodes, edges: baseEdges };
 
       setNodes(expandedDiagram.nodes);
       setEdges(expandedDiagram.edges);
-      setSelected({ type: "node", id: product.id });
+      selectSchemaItem({ type: "node", id: product.id });
       setSchemaStatus("ready");
 
       window.requestAnimationFrame(() => {
-        if (schema.diagramViewport) {
+        if (shouldUseSavedLayout && schema.diagramViewport) {
           void reactFlow.setViewport(schema.diagramViewport, { duration: 120 });
         } else {
           reactFlow.fitView({ padding: 0.25, duration: 120 });
         }
       });
     } catch (error) {
-      console.error("Product schema diagram load failed", error);
+      logDevError("Product schema diagram load failed", error);
       setNodes([createProductNode(product, { x: 0, y: 0 }, true, stockByProductId[product.id] ?? null)]);
       setEdges([]);
-      setSelected({ type: "node", id: product.id });
+      selectSchemaItem({ type: "node", id: product.id });
       setSchemaStatus("error");
     }
   }
@@ -215,7 +283,9 @@ function FabricationDiagramWorkspaceInner({
       return;
     }
 
-    const sourceNode = selected?.type === "node" ? nodes.find((node) => node.id === selected.id) : nodes.find((node) => node.id === targetProduct.id);
+    const currentSelection = selectedRef.current;
+    const sourceNode =
+      currentSelection?.type === "node" ? nodes.find((node) => node.id === currentSelection.id) : nodes.find((node) => node.id === targetProduct.id);
     const sourceProduct = sourceNode?.data.product ?? targetProduct;
     const sourceId = sourceNode?.id ?? targetProduct.id;
     const validationMessage = validateComponentProduct(sourceProduct, product);
@@ -240,7 +310,7 @@ function FabricationDiagramWorkspaceInner({
         ? currentEdges
         : addEdge(componentEdge, currentEdges),
     );
-    setSelected({ type: "node", id: sourceId });
+    selectSchemaItem({ type: "node", id: sourceId });
     setSaveStatus("idle");
     setMessage("");
 
@@ -252,7 +322,7 @@ function FabricationDiagramWorkspaceInner({
           setEdges((currentEdges) => mergeEdgesById(currentEdges, expanded.edges));
         }
       } catch (error) {
-        console.error("Semi-finished schema expansion failed", error);
+        logDevError("Semi-finished schema expansion failed", error);
         setMessage(formatApiError(error, "Impossible de charger le schema du semi-fini."));
         setSaveStatus("error");
       }
@@ -281,7 +351,11 @@ function FabricationDiagramWorkspaceInner({
     depth: number,
   ): Promise<{ nodes: ProductFlowNode[]; edges: ProductFlowEdge[] }> {
     const schema = await fetchProductSchemaDiagram(parentNode.data.product.id);
-    if (!schema.recipeId || schema.diagramNodes.length === 0) return { nodes: [], edges: [] };
+    if (!schema.recipeId) return { nodes: [], edges: [] };
+
+    if (schema.diagramNodes.length === 0) {
+      return buildExpandedSubtreeFromComponents(parentNode, schema.components, visitedProductIds, depth);
+    }
 
     const schemaProductById = new Map(productById);
     schema.diagramProducts.forEach((schemaProduct) => schemaProductById.set(schemaProduct.id, schemaProduct));
@@ -337,6 +411,20 @@ function FabricationDiagramWorkspaceInner({
     return { nodes: expandedNodes, edges: expandedEdges };
   }
 
+  function buildExpandedSubtreeFromComponents(
+    parentNode: ProductFlowNode,
+    components: ProductSchemaNode[],
+    visitedProductIds: Set<string>,
+    depth: number,
+  ): { nodes: ProductFlowNode[]; edges: ProductFlowEdge[] } {
+    const expandedNodes: ProductFlowNode[] = [];
+    const expandedEdges: ProductFlowEdge[] = [];
+    const branches = createAutoLayoutBranches(components, visitedProductIds);
+    layoutAutoBranches(parentNode.id, parentNode.position, branches, depth, expandedNodes, expandedEdges, stockByProductId);
+
+    return { nodes: expandedNodes, edges: expandedEdges };
+  }
+
   const handleConnect = useCallback(
     (connection: Connection) => {
       const validationMessage = validateConnection(connection, targetProduct, nodes, edges);
@@ -362,22 +450,39 @@ function FabricationDiagramWorkspaceInner({
     void addProductToCanvas(product, reactFlow.screenToFlowPosition({ x: event.clientX, y: event.clientY }));
   }
 
-  function handleDeleteSelected() {
-    if (!selected) return;
-
-    if (selected.type === "edge") {
-      setEdges((currentEdges) => currentEdges.filter((edge) => edge.id !== selected.id));
-      setSelected(null);
-      setSaveStatus("idle");
+  function requestDeleteSelected() {
+    const candidate = buildDeleteCandidate(selected, nodes, edges, targetProduct);
+    if (!candidate) {
+      if (selected?.type === "node" && selected.id === targetProduct?.id) {
+        setSaveStatus("error");
+        setMessage("Le produit cible ne peut pas etre retire du schema.");
+      }
       return;
     }
 
-    if (selected.id === targetProduct?.id) return;
+    setDeleteCandidate(candidate);
+  }
 
-    setNodes((currentNodes) => currentNodes.filter((node) => node.id !== selected.id));
-    setEdges((currentEdges) => currentEdges.filter((edge) => edge.source !== selected.id && edge.target !== selected.id));
-    setSelected(targetProduct ? { type: "node", id: targetProduct.id } : null);
+  function confirmDeleteSelected() {
+    if (!deleteCandidate) return;
+
+    if (deleteCandidate.type === "edge") {
+      setEdges((currentEdges) => currentEdges.filter((edge) => edge.id !== deleteCandidate.id));
+      selectSchemaItem(null);
+      setSaveStatus("idle");
+      setMessage("");
+      setDeleteCandidate(null);
+      return;
+    }
+
+    const removedNodeIds = getSubtreeNodeIds(deleteCandidate.id, edges);
+
+    setNodes((currentNodes) => currentNodes.filter((node) => !removedNodeIds.has(node.id)));
+    setEdges((currentEdges) => currentEdges.filter((edge) => !removedNodeIds.has(edge.source) && !removedNodeIds.has(edge.target)));
+    selectSchemaItem(targetProduct ? { type: "node", id: targetProduct.id } : null);
     setSaveStatus("idle");
+    setMessage("");
+    setDeleteCandidate(null);
   }
 
   function handleOpenSchema(product: Product) {
@@ -406,36 +511,159 @@ function FabricationDiagramWorkspaceInner({
       const savedNodes = [...nodes];
       const savedEdges = [...edges];
 
-      await saveProductSchemaDiagram(targetProduct.id, componentEdgeIds, {
-        nodes: serializeNodes(savedNodes),
-        edges: serializeEdges(savedEdges),
-        viewport: reactFlow.getViewport(),
-      });
+      const targetsToSave = buildSchemaSaveTargets(targetProduct, savedNodes, savedEdges);
+
+      for (const schemaTarget of targetsToSave) {
+        const isRootTarget = schemaTarget.productId === targetProduct.id;
+        await saveProductSchemaDiagram(schemaTarget.productId, schemaTarget.componentProductIds, {
+          nodes: isRootTarget ? serializeNodes(savedNodes) : [],
+          edges: isRootTarget ? serializeEdges(savedEdges) : [],
+          viewport: isRootTarget ? reactFlow.getViewport() : null,
+        });
+      }
       await onSchemaSaved();
       setNodes(savedNodes);
       setEdges(savedEdges);
       setSaveStatus("success");
       setMessage("Schema enregistre.");
     } catch (error) {
-      console.error("Schema save failed", error);
+      logDevError("Schema save failed", error);
       setSaveStatus("error");
       setMessage(formatApiError(error, "Impossible d'enregistrer le schema."));
     }
   }
 
-  const onNodeClick: NodeMouseHandler<ProductFlowNode> = (_event, node) => setSelected({ type: "node", id: node.id });
-  const onEdgeClick: EdgeMouseHandler<ProductFlowEdge> = (_event, edge) => setSelected({ type: "edge", id: edge.id });
+  async function handleSaveCodification(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedCodificationProduct) return;
+
+    const lotZone = codificationDraft.zone.trim();
+    const lotCode = codificationDraft.code.trim().replace(/\s+/g, "");
+
+    if (!lotZone || !lotCode) {
+      setCodificationStatus("error");
+      setSaveStatus("error");
+      setMessage("Zone et codification sont requises.");
+      return;
+    }
+
+    const duplicateProduct = findProductWithMatchingCodification(products, selectedCodificationProduct.id, lotZone, lotCode);
+    if (duplicateProduct) {
+      setCodificationStatus("error");
+      setSaveStatus("error");
+      setMessage(`Codification deja utilisee par ${duplicateProduct.name}.`);
+      return;
+    }
+
+    setCodificationStatus("saving");
+    setMessage("");
+
+    try {
+      await updateProductLotCodification(selectedCodificationProduct.id, lotZone, lotCode);
+      applyProductCodification(selectedCodificationProduct.id, lotZone, lotCode);
+      await onSchemaSaved();
+      setCodificationDraft({ zone: lotZone, code: lotCode });
+      setIsCodificationPopoverOpen(false);
+      setCodificationStatus("success");
+      setSaveStatus("success");
+      setMessage("Codification enregistree.");
+    } catch (error) {
+      logDevError("Product codification save failed", error);
+      setCodificationStatus("error");
+      setSaveStatus("error");
+      setMessage(formatApiError(error, "Impossible d'enregistrer la codification."));
+    }
+  }
+
+  function applyProductCodification(productId: string, lotZone: string, lotCode: string) {
+    const patchProduct = (product: Product): Product => (product.id === productId ? { ...product, lotZone, lotCode } : product);
+
+    setTargetProduct((currentTarget) => (currentTarget ? patchProduct(currentTarget) : currentTarget));
+    setNodes((currentNodes) =>
+      currentNodes.map((node) => ({
+        ...node,
+        data: {
+          ...node.data,
+          product: patchProduct(node.data.product),
+        },
+      })),
+    );
+  }
+
+  const onNodeClick: NodeMouseHandler<ProductFlowNode> = (_event, node) => selectSchemaItem({ type: "node", id: node.id });
+  const onEdgeClick: EdgeMouseHandler<ProductFlowEdge> = (_event, edge) => selectSchemaItem({ type: "edge", id: edge.id });
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || deleteCandidate || !isDeleteKey(event) || isEditableKeyboardTarget(event.target)) return;
+      const candidate = buildDeleteCandidate(selected, nodes, edges, targetProduct);
+      if (!candidate) return;
+
+      event.preventDefault();
+      requestDeleteSelected();
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [deleteCandidate, edges, nodes, selected, targetProduct]);
 
   return (
     <main className="diagram-fullscreen-page">
       <section className="diagram-canvas-card fullscreen">
         <div className="diagram-floating-actions">
-          <span className={`diagram-status ${schemaStatus}`}>{schemaStatus === "loading" ? "Chargement" : `${componentEdgeIds.length} lien(s)`}</span>
+          <div className="codification-popover-wrapper">
+            <button
+              className="button secondary"
+              disabled={!selectedCodificationProduct || codificationStatus === "saving"}
+              onClick={() => setIsCodificationPopoverOpen((current) => !current)}
+              title={selectedCodificationProduct ? "Modifier la codification du lot" : "Selectionnez une carte produit"}
+              type="button"
+            >
+              Codification
+            </button>
+            {isCodificationPopoverOpen && selectedCodificationProduct ? (
+              <form className="codification-popover" onSubmit={handleSaveCodification}>
+                <div className="codification-popover-title">
+                  <span>Produit selectionne</span>
+                  <strong>{selectedCodificationProduct.name}</strong>
+                </div>
+                <label>
+                  <span>Zone number</span>
+                  <input
+                    autoComplete="off"
+                    value={codificationDraft.zone}
+                    onChange={(event) => setCodificationDraft((draft) => ({ ...draft, zone: event.target.value }))}
+                    placeholder="PBC02"
+                  />
+                </label>
+                <label>
+                  <span>Codification number</span>
+                  <input
+                    autoComplete="off"
+                    value={codificationDraft.code}
+                    onChange={(event) => setCodificationDraft((draft) => ({ ...draft, code: event.target.value }))}
+                    placeholder="PV"
+                  />
+                </label>
+                <div className="codification-popover-actions">
+                  <button className="button secondary" onClick={() => setIsCodificationPopoverOpen(false)} type="button">
+                    Annuler
+                  </button>
+                  <button className="button primary" disabled={codificationStatus === "saving"} type="submit">
+                    {codificationStatus === "saving" ? "..." : "Enregistrer"}
+                  </button>
+                </div>
+              </form>
+            ) : null}
+          </div>
+          <span className={`diagram-status ${schemaStatus}`}>
+            {schemaStatus === "loading" ? <TraceabilityLoader compact label="Chargement" /> : `${componentEdgeIds.length} lien(s)`}
+          </span>
           <button className="button secondary" onClick={onBack} type="button">
             Retour
           </button>
           <button className="button primary" disabled={!canSave} onClick={handleSaveSchema} type="button">
-            {saveStatus === "saving" ? "Enregistrement..." : "Enregistrer schema"}
+            {saveStatus === "saving" ? <TraceabilityLoader compact label="Enregistrement..." /> : "Enregistrer schema"}
           </button>
         </div>
 
@@ -479,6 +707,8 @@ function FabricationDiagramWorkspaceInner({
           fitView
           fitViewOptions={{ padding: 0.25 }}
           isValidConnection={(connection) => !validateConnection(connection, targetProduct, nodes, edges)}
+          minZoom={0.05}
+          deleteKeyCode={null}
           nodesDraggable
           nodesConnectable={Boolean(targetProduct)}
           onConnect={handleConnect}
@@ -491,15 +721,18 @@ function FabricationDiagramWorkspaceInner({
           onEdgesChange={onEdgesChange}
           onNodeClick={onNodeClick}
           onNodesChange={onNodesChange}
-          onPaneClick={() => setSelected(null)}
+          onPaneClick={() => selectSchemaItem(null)}
         >
-          <Background color="#3f3f46" gap={22} size={1.15} />
+          <Background color="var(--diagram-grid-dot)" gap={20} size={1.45} />
           <Controls position="bottom-right" />
           <MiniMap nodeColor={miniMapNodeColor} pannable zoomable />
         </ReactFlow>
         {!targetProduct ? <div className="diagram-empty">Selectionnez un produit cible pour commencer.</div> : null}
         {targetProduct && componentNodeCount === 0 ? <div className="diagram-empty">Ajoutez des composants depuis la recherche flottante.</div> : null}
       </section>
+      {deleteCandidate ? (
+        <DeleteConfirmationDialog candidate={deleteCandidate} onCancel={() => setDeleteCandidate(null)} onConfirm={confirmDeleteSelected} />
+      ) : null}
     </main>
   );
 }
@@ -515,23 +748,19 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
 }
 
 function ProductNode({ data, selected }: NodeProps<ProductFlowNode>) {
-  const { product, isTarget, stock } = data;
+  const { product, isTarget } = data;
   const canHaveComponents = isTarget || product.type === "semi_finished";
 
   return (
-    <div className={`diagram-node ${product.type} ${isTarget ? "target" : ""} ${selected ? "selected" : ""}`}>
-      {!isTarget ? <Handle className="diagram-handle target-handle" position={Position.Left} type="target" /> : null}
-      {canHaveComponents ? <Handle className="diagram-handle source-handle" position={Position.Right} type="source" /> : null}
-      <div className="diagram-node-header">
-        <span>{product.code}</span>
-        {product.recipeStatus === "active" && product.type === "semi_finished" ? <b>Schema</b> : null}
-      </div>
-      <strong>{product.name}</strong>
-      <div className="diagram-node-meta">
-        <span className={`type-pill ${product.type}`}>{typeLabels[product.type]}</span>
-      </div>
-      <small>{formatStockPreview(stock)}</small>
-    </div>
+    <DiagramProductCard
+      canHaveComponents={canHaveComponents}
+      headerBadge={product.recipeStatus === "active" && product.type === "semi_finished" ? "Schema" : undefined}
+      headerText={product.code}
+      isTarget={isTarget}
+      productName={product.name}
+      productType={product.type}
+      selected={selected}
+    />
   );
 }
 
@@ -584,6 +813,47 @@ function ProductSidebarList({
         );
       })}
       {products.length === 0 ? <div className="schema-empty compact">Aucun produit trouve.</div> : null}
+    </div>
+  );
+}
+
+function DeleteConfirmationDialog({
+  candidate,
+  onCancel,
+  onConfirm,
+}: {
+  candidate: DeleteCandidate;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const isBranchDelete = candidate.type === "node" && candidate.affectedNodeCount > 1;
+  const body =
+    candidate.type === "edge"
+      ? `Supprimer le lien "${candidate.label}" du schema ?`
+      : isBranchDelete
+        ? `Retirer "${candidate.label}" et ses ${candidate.affectedNodeCount - 1} composant(s) enfant(s) visibles du schema ?`
+        : `Retirer "${candidate.label}" du schema ?`;
+
+  return (
+    <div aria-labelledby="diagram-delete-title" aria-modal="true" className="app-dialog-overlay modal" role="dialog">
+      <button aria-label="Annuler la suppression" className="app-dialog-backdrop" onClick={onCancel} type="button" />
+      <section className="app-dialog-surface modal diagram-delete-dialog">
+        <div className="app-dialog-header">
+          <h2 id="diagram-delete-title">Confirmer la suppression</h2>
+        </div>
+        <div className="app-dialog-body">
+          <p>{body}</p>
+          <p className="dialog-muted-text">Cette action modifie le schema en cours. Elle sera definitive apres enregistrement du schema.</p>
+        </div>
+        <div className="app-dialog-footer">
+          <button className="button secondary" onClick={onCancel} type="button">
+            Annuler
+          </button>
+          <button className="button danger-soft" onClick={onConfirm} type="button">
+            Supprimer
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -692,8 +962,19 @@ function createProductEdge(source: string, target: string): ProductFlowEdge {
     source,
     target,
     type: "smoothstep",
-    markerEnd: { type: MarkerType.ArrowClosed },
+    markerEnd: { type: MarkerType.ArrowClosed, color: diagramLinkColor },
+    style: { stroke: diagramLinkColor, strokeWidth: 2 },
   };
+}
+
+function hasNodeOverlap(nodes: ProductFlowNode[]) {
+  return nodes.some((node, index) =>
+    nodes.slice(index + 1).some(
+      (otherNode) =>
+        Math.abs(node.position.x - otherNode.position.x) < 250 &&
+        Math.abs(node.position.y - otherNode.position.y) < 160,
+    ),
+  );
 }
 
 function restoreDiagramNodes(
@@ -731,30 +1012,93 @@ function restoreDiagramEdges(diagramEdges: SchemaDiagramEdge[], nodeIds: Set<str
     .map((edge) => createProductEdge(edge.source, edge.target));
 }
 
-function buildDefaultDiagramNodes(targetProduct: Product, components: Product[], stockByProductId: Record<string, LotStockPreview>) {
-  return [
-    createProductNode(targetProduct, { x: -360, y: 0 }, true, stockByProductId[targetProduct.id] ?? null),
-    ...components.map((product, index) =>
+function buildAutoLayoutDiagram(targetProduct: Product, components: ProductSchemaNode[], stockByProductId: Record<string, LotStockPreview>) {
+  const targetPosition = { x: -DIAGRAM_TREE_GAP, y: 0 };
+  const rootNode = createProductNode(targetProduct, targetPosition, true, stockByProductId[targetProduct.id] ?? null);
+  const branches = createAutoLayoutBranches(components, new Set([targetProduct.id]));
+  const nodes: ProductFlowNode[] = [rootNode];
+  const edges: ProductFlowEdge[] = [];
+
+  layoutAutoBranches(targetProduct.id, targetPosition, branches, 1, nodes, edges, stockByProductId);
+
+  return { nodes, edges };
+}
+
+function hasNestedSchemaComponents(components: ProductSchemaNode[]): boolean {
+  return components.some((component) => component.children.length > 0 || hasNestedSchemaComponents(component.children));
+}
+
+function createAutoLayoutBranches(components: ProductSchemaNode[], visitedProductIds: Set<string>): AutoLayoutBranch[] {
+  return components.flatMap((component) => {
+    if (visitedProductIds.has(component.id)) return [];
+
+    const nextVisitedProductIds = new Set(visitedProductIds);
+    nextVisitedProductIds.add(component.id);
+    const children = component.type === "semi_finished" ? createAutoLayoutBranches(component.children, nextVisitedProductIds) : [];
+
+    return [
+      {
+        component,
+        children,
+        leafSlots: Math.max(1, sumBranchLeafSlots(children)),
+      },
+    ];
+  });
+}
+
+function sumBranchLeafSlots(branches: AutoLayoutBranch[]) {
+  return branches.reduce((total, branch) => total + branch.leafSlots, 0);
+}
+
+function layoutAutoBranches(
+  parentNodeId: string,
+  parentPosition: { x: number; y: number },
+  branches: AutoLayoutBranch[],
+  depth: number,
+  nodes: ProductFlowNode[],
+  edges: ProductFlowEdge[],
+  stockByProductId: Record<string, LotStockPreview>,
+) {
+  if (branches.length === 0) return;
+
+  const totalLeafSlots = sumBranchLeafSlots(branches);
+  let nextSlotStart = 0;
+
+  branches.forEach((branch) => {
+    const nodeY = parentPosition.y + (nextSlotStart + (branch.leafSlots - 1) / 2 - (totalLeafSlots - 1) / 2) * DIAGRAM_ROW_GAP;
+    const nodePosition = {
+      x: parentPosition.x + DIAGRAM_TREE_GAP + (depth - 1) * DIAGRAM_NESTED_OFFSET,
+      y: nodeY,
+    };
+    const nodeId = createComponentNodeId(parentNodeId, branch.component.id);
+
+    nodes.push(
       createProductNode(
-        product,
-        getGridPosition(index, components.length),
+        branch.component,
+        nodePosition,
         false,
-        stockByProductId[product.id] ?? null,
-        createComponentNodeId(targetProduct.id, product.id),
+        branch.component.stock ?? stockByProductId[branch.component.id] ?? null,
+        nodeId,
       ),
-    ),
-  ];
+    );
+    edges.push(createProductEdge(parentNodeId, nodeId));
+
+    layoutAutoBranches(nodeId, nodePosition, branch.children, depth + 1, nodes, edges, stockByProductId);
+    nextSlotStart += branch.leafSlots;
+  });
 }
 
 function getGridPosition(index: number, total: number) {
-  const columns = Math.min(4, Math.max(1, total));
+  const columns = Math.min(3, Math.max(1, total));
   const column = index % columns;
   const row = Math.floor(index / columns);
-  const startX = -((columns - 1) * 280) / 2;
+  const rows = Math.ceil(total / columns);
+  const startX = -((columns - 1) * DIAGRAM_COLUMN_GAP) / 2;
+  const startY = -((rows - 1) * DIAGRAM_ROW_GAP) / 2;
 
   return {
-    x: 80 + startX + column * 280,
-    y: row * 190,
+    x: 80 + startX + column * DIAGRAM_COLUMN_GAP,
+    y: startY + row * DIAGRAM_ROW_GAP,
   };
 }
 
@@ -766,8 +1110,8 @@ function getChildNodePosition(parentPosition: { x: number; y: number } | undefin
   if (!parentPosition) return getNextNodePosition(siblingCount + 1);
 
   return {
-    x: parentPosition.x + 320,
-    y: parentPosition.y + (siblingCount - 0.5) * 170,
+    x: parentPosition.x + DIAGRAM_TREE_GAP,
+    y: parentPosition.y + (siblingCount - 0.5) * DIAGRAM_ROW_GAP,
   };
 }
 
@@ -786,7 +1130,7 @@ function getExpandedNodePosition(
   depth: number,
 ) {
   return {
-    x: parentPosition.x + 360 + (nodePosition.x - rootPosition.x) + (depth - 1) * 80,
+    x: parentPosition.x + DIAGRAM_TREE_GAP + (nodePosition.x - rootPosition.x) + (depth - 1) * DIAGRAM_NESTED_OFFSET,
     y: parentPosition.y + (nodePosition.y - rootPosition.y),
   };
 }
@@ -801,6 +1145,62 @@ function mergeEdgesById(currentEdges: ProductFlowEdge[], incomingEdges: ProductF
   const edgesById = new Map(currentEdges.map((edge) => [edge.id, edge]));
   incomingEdges.forEach((edge) => edgesById.set(edge.id, edge));
   return [...edgesById.values()];
+}
+
+function buildDeleteCandidate(selected: SelectionState, nodes: ProductFlowNode[], edges: ProductFlowEdge[], targetProduct: Product | null): DeleteCandidate | null {
+  if (!selected) return null;
+
+  if (selected.type === "edge") {
+    const edge = edges.find((candidate) => candidate.id === selected.id);
+    if (!edge) return null;
+    const source = nodes.find((node) => node.id === edge.source)?.data.product.name ?? "source";
+    const target = nodes.find((node) => node.id === edge.target)?.data.product.name ?? "composant";
+    return { type: "edge", id: selected.id, label: `${source} -> ${target}`, affectedNodeCount: 0 };
+  }
+
+  if (selected.id === targetProduct?.id) return null;
+
+  const node = nodes.find((candidate) => candidate.id === selected.id);
+  if (!node) return null;
+
+  return {
+    type: "node",
+    id: selected.id,
+    label: node.data.product.name,
+    affectedNodeCount: getSubtreeNodeIds(selected.id, edges).size,
+  };
+}
+
+function getSubtreeNodeIds(rootNodeId: string, edges: ProductFlowEdge[]) {
+  const nodeIds = new Set<string>([rootNodeId]);
+  const pending = [rootNodeId];
+
+  while (pending.length > 0) {
+    const currentId = pending.shift()!;
+    for (const edge of edges) {
+      if (edge.source !== currentId || nodeIds.has(edge.target)) continue;
+      nodeIds.add(edge.target);
+      pending.push(edge.target);
+    }
+  }
+
+  return nodeIds;
+}
+
+function isDeleteKey(event: KeyboardEvent) {
+  return (
+    event.key === "Delete" ||
+    event.key === "Backspace" ||
+    event.key === "Clear" ||
+    event.key === "Cancel" ||
+    event.code === "Delete" ||
+    event.code === "Backspace"
+  );
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true'], [contenteditable='']"));
 }
 
 function validateComponentProduct(sourceProduct: Product, product: Product) {
@@ -842,6 +1242,68 @@ function validateBeforeSave(targetProduct: Product, nodes: ProductFlowNode[], ed
   return "";
 }
 
+function buildSchemaSaveTargets(targetProduct: Product | null, nodes: ProductFlowNode[], edges: ProductFlowEdge[]): SchemaSaveTarget[] {
+  if (!targetProduct) return [];
+
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const depthByNodeId = getNodeDepths(targetProduct.id, edges);
+  const targetsByProductId = new Map<string, SchemaSaveTarget>();
+
+  for (const node of nodes) {
+    const product = node.data.product;
+    const canOwnSchema = product.id === targetProduct.id || product.type === "semi_finished";
+    if (!canOwnSchema || product.type === "raw") continue;
+
+    const componentProductIds = [
+      ...new Set(
+        edges
+          .filter((edge) => edge.source === node.id)
+          .map((edge) => nodeById.get(edge.target)?.data.product.id)
+          .filter((productId): productId is string => Boolean(productId) && productId !== product.id),
+      ),
+    ];
+    if (componentProductIds.length === 0) continue;
+
+    const depth = depthByNodeId.get(node.id) ?? 0;
+    const existingTarget = targetsByProductId.get(product.id);
+    if (!existingTarget) {
+      targetsByProductId.set(product.id, { productId: product.id, componentProductIds, depth });
+      continue;
+    }
+
+    componentProductIds.forEach((componentProductId) => {
+      if (!existingTarget.componentProductIds.includes(componentProductId)) {
+        existingTarget.componentProductIds.push(componentProductId);
+      }
+    });
+    existingTarget.depth = Math.max(existingTarget.depth, depth);
+  }
+
+  return [...targetsByProductId.values()].sort((left, right) => {
+    if (left.productId === targetProduct.id) return 1;
+    if (right.productId === targetProduct.id) return -1;
+    return right.depth - left.depth;
+  });
+}
+
+function getNodeDepths(rootNodeId: string, edges: ProductFlowEdge[]) {
+  const depthByNodeId = new Map<string, number>([[rootNodeId, 0]]);
+  const pending = [rootNodeId];
+
+  while (pending.length > 0) {
+    const source = pending.shift()!;
+    const sourceDepth = depthByNodeId.get(source) ?? 0;
+
+    for (const edge of edges) {
+      if (edge.source !== source || depthByNodeId.has(edge.target)) continue;
+      depthByNodeId.set(edge.target, sourceDepth + 1);
+      pending.push(edge.target);
+    }
+  }
+
+  return depthByNodeId;
+}
+
 function getDirectComponentIds(targetProduct: Product | null, nodes: ProductFlowNode[], edges: ProductFlowEdge[]) {
   if (!targetProduct) return [];
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
@@ -877,16 +1339,50 @@ function serializeEdges(edges: ProductFlowEdge[]): SchemaDiagramEdge[] {
 }
 
 function filterProducts(products: Product[], query: string) {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return products;
+  return filterByNameOrCode(products, query);
+}
 
-  return products.filter((product) => product.name.toLowerCase().includes(normalizedQuery) || product.code.toLowerCase().includes(normalizedQuery));
+function findProductWithMatchingCodification(products: Product[], currentProductId: string, lotZone: string, lotCode: string) {
+  const normalizedTarget = normalizeCodificationKey(lotZone, lotCode);
+  if (!normalizedTarget) return null;
+
+  return (
+    products.find((product) => {
+      if (product.id === currentProductId || product.type === "raw") return false;
+      const resolvedCodification = resolveProductionLotCodification(product);
+      if (!resolvedCodification) return false;
+      return normalizeCodificationKey(resolvedCodification.zone, resolvedCodification.code) === normalizedTarget;
+    }) ?? null
+  );
+}
+
+function normalizeCodificationKey(lotZone: string, lotCode: string) {
+  const normalizedZone = normalizeCodificationZone(lotZone);
+  const normalizedCode = lotCode.trim().toUpperCase().replace(/\s+/g, "").replace(/^-+|-+$/g, "");
+  return normalizedZone && normalizedCode ? `${normalizedZone}:${normalizedCode}` : "";
+}
+
+function normalizeCodificationZone(lotZone: string) {
+  const compactZone = lotZone.trim().toUpperCase().replace(/\s+/g, "").replace(/-/g, "");
+  const pbcZone = compactZone.match(/^PBC(\d{1,2})$/);
+  if (pbcZone) return `PBC${pbcZone[1].padStart(2, "0")}`;
+
+  const numericZone = compactZone.match(/^(\d{1,2})$/);
+  if (numericZone) return `PBC${numericZone[1].padStart(2, "0")}`;
+
+  return compactZone.replace(/^-+|-+$/g, "");
+}
+
+function logDevError(message: string, error: unknown) {
+  if (import.meta.env.DEV) {
+    console.error(message, error);
+  }
 }
 
 function miniMapNodeColor(node: ProductFlowNode) {
-  if (node.data.isTarget) return "#216fe6";
+  if (node.data.product.type === "finished") return "#3fcf8e";
   if (node.data.product.type === "semi_finished") return "#7a5c06";
-  return "#4d6b58";
+  return "#216fe6";
 }
 
 function formatStockPreview(stock: LotStockPreview | null | undefined) {
