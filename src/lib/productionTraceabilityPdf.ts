@@ -6,6 +6,7 @@ import type {
   ProductionBatch,
   ProductionConsumptionDetail,
   ProductionTraceabilityNode,
+  ProductionTraceabilitySnapshot,
   ProductSchemaNode,
 } from "./traceabilityApi";
 import logoUrl from "../assets/casablanca-logo.jpg";
@@ -20,6 +21,8 @@ type PdfColumn = {
 
 export type ProductionPdfLotDraft = {
   lots: AvailableLotOption[];
+  selectedProductId?: string;
+  selectedProductName?: string;
   selectedLotIds: string[];
 };
 
@@ -66,6 +69,17 @@ type PdfImageResource = {
   width: number;
 };
 
+function sortComponentsOrder<T extends { type?: string; productType?: string }>(items: T[]): T[] {
+  return [...items].sort((a, b) => {
+    const typeOrder = (t: string | undefined) => (t === "semi_finished" ? 0 : t === "raw" ? 1 : 2);
+    return typeOrder(a.type ?? a.productType) - typeOrder(b.type ?? b.productType);
+  });
+}
+
+function productionPdfSchemaRowKey(component: ProductSchemaNode, parentKey: string, index: number) {
+  return parentKey ? `${parentKey}/${component.id}:${index}` : `${component.id}:${index}`;
+}
+
 const a4Landscape = {
   width: 841.89,
   height: 595.28,
@@ -95,29 +109,48 @@ export function buildProductionPdfData({
   productionDate: string;
   responsibleName: string | null;
 }): ProductionPdfData {
-  const selectedLotsByProductId = new Map<string, AvailableLotOption | null>();
+  const selectedLotsByKey = new Map<string, AvailableLotOption | null>();
+  const selectedProductNamesByKey = new Map<string, string>();
 
-  for (const draft of componentDrafts) {
-    selectedLotsByProductId.set(draft.component.id, selectedLotFromDraft(draft));
+  function setDraftSelection(key: string, draft: ProductionPdfLotDraft) {
+    selectedLotsByKey.set(key, selectedLotFromDraft(draft));
+    if (draft.selectedProductName) selectedProductNamesByKey.set(key, draft.selectedProductName);
   }
 
-  for (const [productId, draft] of Object.entries(nestedLotDrafts)) {
-    selectedLotsByProductId.set(productId, selectedLotFromDraft(draft));
+  const sortedDrafts = [...componentDrafts].sort((left, right) => {
+    const typeOrder = (type: string) => (type === "semi_finished" ? 0 : type === "raw" ? 1 : 2);
+    return typeOrder(left.component.type) - typeOrder(right.component.type);
+  });
+
+  sortedDrafts.forEach((draft, index) => {
+    const rowKey = productionPdfSchemaRowKey(draft.component, "", index);
+    setDraftSelection(rowKey, draft);
+    if (!selectedLotsByKey.has(draft.component.id)) setDraftSelection(draft.component.id, draft);
+  });
+
+  for (const [key, draft] of Object.entries(nestedLotDrafts)) {
+    setDraftSelection(key, draft);
+    if (draft.selectedProductId && !selectedLotsByKey.has(draft.selectedProductId)) setDraftSelection(draft.selectedProductId, draft);
   }
 
   const rows: ProductionPdfRow[] = [];
 
-  function lotForProduct(productId: string) {
-    return selectedLotsByProductId.get(productId) ?? null;
+  function lotForComponent(component: ProductSchemaNode, rowKey: string) {
+    return selectedLotsByKey.get(rowKey) ?? selectedLotsByKey.get(component.id) ?? null;
   }
 
-  function walk(component: ProductSchemaNode, semiFinishedPath: string[], currentSemiFinishedLot: string | null) {
+  function selectedNameForComponent(component: ProductSchemaNode, rowKey: string) {
+    const selectedLot = lotForComponent(component, rowKey);
+    return selectedLot?.productName || selectedProductNamesByKey.get(rowKey) || selectedProductNamesByKey.get(component.id) || component.name;
+  }
+
+  function walk(component: ProductSchemaNode, rowKey: string, semiFinishedPath: string[], currentSemiFinishedLot: string | null) {
     if (component.type === "raw") {
       rows.push({
         targetProduct: product.name,
         semiFinishedPath: semiFinishedPath.join(" > "),
-        rawMaterial: component.name,
-        rawMaterialLot: displayLot(lotForProduct(component.id)),
+        rawMaterial: selectedNameForComponent(component, rowKey),
+        rawMaterialLot: displayLot(lotForComponent(component, rowKey)),
         semiFinishedLot: currentSemiFinishedLot ?? "",
         targetProductLot: productLot,
         observations: "",
@@ -127,8 +160,8 @@ export function buildProductionPdfData({
 
     if (component.type !== "semi_finished") return;
 
-    const nextPath = [...semiFinishedPath, component.name];
-    const nextLot = displayLot(lotForProduct(component.id));
+    const nextPath = [...semiFinishedPath, selectedNameForComponent(component, rowKey)];
+    const nextLot = displayLot(lotForComponent(component, rowKey));
 
     if (component.children.length === 0) {
       rows.push({
@@ -143,13 +176,13 @@ export function buildProductionPdfData({
       return;
     }
 
-    for (const child of component.children) {
-      walk(child, nextPath, nextLot);
+    for (const [index, child] of sortComponentsOrder(component.children).entries()) {
+      walk(child, productionPdfSchemaRowKey(child, rowKey, index), nextPath, nextLot);
     }
   }
 
-  for (const draft of componentDrafts) {
-    walk(draft.component, [], null);
+  for (const [index, draft] of sortedDrafts.entries()) {
+    walk(draft.component, productionPdfSchemaRowKey(draft.component, "", index), [], null);
   }
 
   const hasNestedSemiFinished = rows.some((row) => row.semiFinishedPath.trim().length > 0);
@@ -181,7 +214,7 @@ export function buildProductionPdfDataFromBatch({
   rows: ProductionConsumptionDetail[];
 }): ProductionPdfData {
   const pdfRows = batch.traceabilitySnapshot
-    ? buildRowsFromSnapshot(batch.traceabilitySnapshot.components, batch.productName, batch.generatedLot, batch.productType)
+    ? buildRowsFromSnapshot(batch.traceabilitySnapshot, batch.productName, batch.generatedLot, batch.productType)
     : buildRowsFromConsumptionRows(rows, batch.productName, batch.generatedLot, batch.productType);
   const hasSemiFinished = pdfRows.some((row) => row.semiFinishedPath.trim().length > 0);
 
@@ -213,8 +246,8 @@ export function buildProductionPdfDataFromBatchSchema({
   const selectedLotsByProductId = new Map<string, AvailableLotOption | null>();
 
   for (const row of rows) {
-    if (!selectedLotsByProductId.has(row.productId)) {
-      selectedLotsByProductId.set(row.productId, lotFromConsumptionRow(row));
+    if (!selectedLotsByProductId.has(row.expectedProductId)) {
+      selectedLotsByProductId.set(row.expectedProductId, lotFromConsumptionRow(row));
     }
   }
 
@@ -224,12 +257,16 @@ export function buildProductionPdfDataFromBatchSchema({
     return selectedLotsByProductId.get(productId) ?? null;
   }
 
+  function materialNameForProduct(component: ProductSchemaNode) {
+    return lotForProduct(component.id)?.productName || component.name;
+  }
+
   function walk(component: ProductSchemaNode, semiFinishedPath: string[], currentSemiFinishedLot: string | null) {
     if (component.type === "raw") {
       pdfRows.push({
         targetProduct: batch.productName,
         semiFinishedPath: semiFinishedPath.join(" > "),
-        rawMaterial: component.name,
+        rawMaterial: materialNameForProduct(component),
         rawMaterialLot: displayLot(lotForProduct(component.id)),
         semiFinishedLot: currentSemiFinishedLot ?? "",
         targetProductLot: batch.generatedLot,
@@ -256,12 +293,12 @@ export function buildProductionPdfDataFromBatchSchema({
       return;
     }
 
-    for (const child of component.children) {
+    for (const child of sortComponentsOrder(component.children)) {
       walk(child, nextPath, nextLot);
     }
   }
 
-  for (const component of components) {
+  for (const component of sortComponentsOrder(components)) {
     walk(component, [], null);
   }
 
@@ -285,8 +322,16 @@ export function buildProductionPdfDataFromBatchSchema({
   };
 }
 
-export async function downloadProductionTraceabilityPdf(data: ProductionPdfData) {
-  const pdfContents = renderProductionPdf(data, await loadPdfLogoImage());
+export async function renderProductionPdfContents(data: ProductionPdfData) {
+  return renderProductionPdf(data, await loadPdfLogoImage());
+}
+
+export async function renderProductionBatchPdfContents(items: ProductionPdfData[]) {
+  return renderProductionBatchPdf(items, await loadPdfLogoImage());
+}
+
+export async function downloadProductionTraceabilityPdf(data: ProductionPdfData, renderedContents?: string) {
+  const pdfContents = renderedContents ?? (await renderProductionPdfContents(data));
   const fileName = `${slugFileName(data.targetProductName)}-${slugFileName(data.targetProductLot)}.pdf`;
 
   if (isTauriRuntime()) {
@@ -311,8 +356,8 @@ export async function downloadProductionTraceabilityPdf(data: ProductionPdfData)
   return { openedFallback: Boolean(openedWindow) };
 }
 
-export async function downloadProductionTraceabilityBatchPdf(items: ProductionPdfData[]) {
-  const pdfContents = renderProductionBatchPdf(items, await loadPdfLogoImage());
+export async function downloadProductionTraceabilityBatchPdf(items: ProductionPdfData[], renderedContents?: string) {
+  const pdfContents = renderedContents ?? (await renderProductionBatchPdfContents(items));
   const fileName = `production-groupee-${new Date().toISOString().slice(0, 10)}.pdf`;
 
   if (isTauriRuntime()) {
@@ -358,20 +403,26 @@ function lotFromConsumptionRow(row: ProductionConsumptionDetail): AvailableLotOp
   return {
     id: row.lotId,
     productId: row.productId,
+    productName: row.productName,
+    productType: row.productType,
+    productCategory: row.category,
     lotNumber: row.lotNumber,
     supplierLot: row.supplierLot,
     supplierName: null,
     sourceType: row.sourceType,
+    sourceId: null,
     createdAt: row.lotCreatedAt,
+    responsibleName: null,
   };
 }
 
 function buildRowsFromSnapshot(
-  components: ProductionTraceabilityNode[],
+  snapshot: ProductionTraceabilitySnapshot,
   targetProductName: string,
   targetProductLot: string,
   targetProductType: Product["type"],
 ) {
+  const components = snapshot.components;
   const childrenByParentNodeId = components.reduce<Record<string, ProductionTraceabilityNode[]>>((groups, component) => {
     const siblings = groups[component.parentNodeId] ?? [];
     siblings.push(component);
@@ -384,12 +435,16 @@ function buildRowsFromSnapshot(
     return node.lots[0] ? node.lots[0].supplierLot ?? node.lots[0].lotNumber : "";
   }
 
+  function materialNameForNode(node: ProductionTraceabilityNode) {
+    return node.lots[0]?.productName || node.productName;
+  }
+
   function walk(node: ProductionTraceabilityNode, semiFinishedPath: string[], currentSemiFinishedLot: string | null) {
     if (node.productType === "raw") {
       rows.push({
         targetProduct: targetProductName,
         semiFinishedPath: semiFinishedPath.join(" > "),
-        rawMaterial: node.productName,
+        rawMaterial: materialNameForNode(node),
         rawMaterialLot: lotForNode(node),
         semiFinishedLot: currentSemiFinishedLot ?? "",
         targetProductLot,
@@ -417,13 +472,16 @@ function buildRowsFromSnapshot(
       return;
     }
 
-    for (const child of children) {
+    for (const child of sortComponentsOrder(children)) {
       walk(child, nextPath, nextLot);
     }
   }
 
-  const rootChildren = components.filter((component) => component.depth === 1);
-  for (const component of rootChildren) {
+  const rootChildren = [
+    ...components.filter((component) => component.parentNodeId === snapshot.root.productId),
+    ...components.filter((component) => component.parentNodeId === ""),
+  ];
+  for (const component of sortComponentsOrder([...new Map(rootChildren.map((node) => [node.nodeId, node])).values()])) {
     walk(component, [], null);
   }
 
@@ -437,7 +495,8 @@ function buildRowsFromConsumptionRows(
   targetProductLot: string,
   targetProductType: Product["type"],
 ) {
-  const pdfRows = rows.map<ProductionPdfRow>((row) => {
+  const sortedRows = sortComponentsOrder(rows);
+  const pdfRows = sortedRows.map<ProductionPdfRow>((row) => {
     const lot = row.supplierLot ?? row.lotNumber;
     return {
       targetProduct: targetProductName,
@@ -463,7 +522,7 @@ function prefixSemiFinishedRootPath(rows: ProductionPdfRow[], rootName: string) 
 function categoryLabelForBatch(batch: ProductionBatch) {
   if (batch.category === "beldi") return "Beldi";
   if (batch.category === "boulangerie") return "Boulangerie";
-  if (batch.category === "cake") return "Cake";
+  if (batch.category === "cake") return "Patisserie";
   if (batch.category === "patisserie") return "Patisserie";
   if (batch.category === "viennoiserie") return "Viennoiserie";
   return "Production";
@@ -581,7 +640,7 @@ function drawDocumentHeader(page: PdfRenderPage, data: ProductionPdfData, logoIm
   drawText(page, `Date d'application : ${data.applicationDate}`, metaX, top - 45, 8, "regular");
 
   const infoY = top - headerHeight - 18;
-  drawText(page, `DF : ${data.productionDate}`, x, infoY, 9, "regular");
+  drawText(page, `Date de production : ${data.productionDate}`, x, infoY, 9, "regular");
   if (data.responsibleName) drawText(page, `Fabrique par : ${data.responsibleName}`, x + 120, infoY, 9, "regular");
   drawText(page, `Produit : ${data.targetProductName}`, x + 300, infoY, 9, "bold");
   drawText(page, `Lot : ${data.targetProductLot}`, x + 560, infoY, 9, "bold");
@@ -597,7 +656,6 @@ function drawBatchDocumentHeader(page: PdfRenderPage, items: ProductionPdfData[]
   const metaWidth = 230;
   const centerWidth = contentWidth - logoWidth - metaWidth;
   const firstItem = items[0];
-  const productionDate = firstItem?.productionDate ?? formatFrenchDate(new Date());
   const categoryLabel = firstItem?.categoryLabel ?? "Production";
 
   drawRect(page, x, top - headerHeight, logoWidth, headerHeight);
@@ -619,11 +677,7 @@ function drawBatchDocumentHeader(page: PdfRenderPage, items: ProductionPdfData[]
   drawLine(page, x + logoWidth + centerWidth, top - 34, x + contentWidth, top - 34);
   drawText(page, `Date d'application : ${firstItem?.applicationDate ?? applicationDate}`, metaX, top - 42, 8, "regular");
 
-  const infoY = top - headerHeight - 14;
-  drawText(page, `DF : ${productionDate}`, x, infoY, 8, "regular");
-  drawText(page, `${items.length} production(s) selectionnee(s)`, x + 150, infoY, 8, "bold");
-
-  return infoY - 14;
+  return top - headerHeight - 12;
 }
 
 function drawCompactProductSection(
@@ -636,7 +690,7 @@ function drawCompactProductSection(
   const titleY = y;
   drawText(page, `Produit : ${data.targetProductName}`, pageMargin, titleY - 8, style.headerFontSize, "bold");
   drawText(page, `Lot : ${data.targetProductLot}`, pageMargin + 280, titleY - 8, style.headerFontSize, "bold");
-  drawText(page, `DF : ${data.productionDate}`, pageMargin + 470, titleY - 8, style.headerFontSize, "regular");
+  drawText(page, `Date de production : ${data.productionDate}`, pageMargin + 470, titleY - 8, style.headerFontSize, "regular");
   if (data.responsibleName) drawText(page, `Fabrique par : ${data.responsibleName}`, pageMargin + 590, titleY - 8, style.headerFontSize, "regular");
 
   const tableHeaderTop = y - style.sectionTitleHeight;
@@ -934,11 +988,11 @@ function cellsBelongToSameGroup(key: PdfColumnKey, current: ProductionPdfRow, ne
     return current.targetProduct === next.targetProduct && current.targetProductLot === next.targetProductLot;
   }
   if (key === "semiFinishedPath") {
-    return Boolean(current.semiFinishedPath) && current.semiFinishedPath === next.semiFinishedPath;
+    return current.targetProduct === next.targetProduct && current.semiFinishedPath === next.semiFinishedPath;
   }
   if (key === "semiFinishedLot") {
     return (
-      Boolean(current.semiFinishedPath) &&
+      current.targetProduct === next.targetProduct &&
       current.semiFinishedPath === next.semiFinishedPath &&
       current.semiFinishedLot === next.semiFinishedLot
     );

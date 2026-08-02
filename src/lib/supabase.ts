@@ -6,3 +6,18 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undef
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 
 export const supabase = isSupabaseConfigured ? createClient(supabaseUrl!, supabaseAnonKey!) : null;
+
+export function getAuthUserLabel(email: string | null | undefined) {
+  if (!email) return "Utilisateur";
+  return email.split("@")[0] || email;
+}
+
+export function getAuthUserInitials(email: string | null | undefined) {
+  const label = getAuthUserLabel(email);
+  return label
+    .split(/[.\s_-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "U";
+}

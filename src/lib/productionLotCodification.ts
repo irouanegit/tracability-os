@@ -2,13 +2,18 @@ import type { Product, ProductCategory } from "./traceabilityApi";
 
 const manualDate = "............";
 
-const zoneByCategory: Record<ProductCategory, string> = {
+export const zoneByCategory: Record<ProductCategory, string> = {
   boulangerie: "PBC01",
   cake: "PBC02",
   patisserie: "PBC02",
   beldi: "PBC03",
   viennoiserie: "PBC04",
 };
+
+export function zoneNumberForCategory(category: ProductCategory | null | undefined) {
+  if (!category) return "";
+  return zoneByCategory[category]?.replace(/^PBC/i, "") ?? "";
+}
 
 const codesByCategory: Record<ProductCategory, Record<string, string>> = {
   boulangerie: {
@@ -191,6 +196,37 @@ const codesByCategory: Record<ProductCategory, Record<string, string>> = {
     "MACARON PETIT NOIR": "39",
     "MACARON PETIT ROUGE": "39",
     "MACARON PETIT VERT": "39",
+    "CAKE ROYALE": "26",
+    "COOKIES AMERICAINS": "27-1",
+    "COOKIES FRAMOISE GR": "27-2",
+    "COOKIES NOISSETE GR": "27-2",
+    "COOKIES NOISETTE GR": "27-2",
+    "COOKIES PISTACH GR": "27-2",
+    "FONDANT CHOCOLAT": "30",
+    "BROWNIE NOIX": "31",
+    "BROWNIE NOISETTE": "32",
+    "CAKE GR AMANDES": "33",
+    "CAKE GR AMANDE": "33",
+    "CAKE GR CHOCOLAT": "33",
+    "CAKE GR VANILLE": "33",
+    "CAKE DATTES": "34",
+    "HONEY CAKE": "35",
+    "MADELEINE SIMPLE": "29",
+    "MADELEINE CHOCOLAT": "29",
+    "CAKE AMR NOUGA": "23",
+    "CAKE AMR NOUGAT": "23",
+    "FERRERO AMERICAN CAKE": "23",
+    "NOUGA AMERICAN CAKE": "23",
+    "NOUGAT AMERICAN CAKE": "23",
+    "NUTELLA AMERICAIN CAKE": "23",
+    "TARTE AMANDE": "37",
+    "TARTE CHOCOLAT": "37",
+    "TARTE CITRON": "37",
+    "TARTE FRAMBOISE": "37",
+    "TARTE NOIX": "37",
+    "TARTE PARIS BREST": "37",
+    "TARTE POMME": "37",
+    "TARTE SOLEIL": "37",
   },
   cake: {
     "CAKE ROYALE": "26",

@@ -3,7 +3,6 @@ import {
   Background,
   Controls,
   MarkerType,
-  MiniMap,
   ReactFlow,
   ReactFlowProvider,
   addEdge,
@@ -26,17 +25,21 @@ import {
   fetchLotStockPreview,
   fetchProductSchemaDiagram,
   formatApiError,
+  createProductCatalogItem,
+  deleteProductCatalogItem,
   saveProductSchemaDiagram,
+  updateProductCatalogItem,
   updateProductLotCodification,
   type LotStockPreview,
   type Product,
+  type ProductCategory,
   type ProductSchemaNode,
   type ProductType,
   type RecipeStatus,
   type SchemaDiagramEdge,
   type SchemaDiagramNode,
 } from "./lib/traceabilityApi";
-import { resolveProductionLotCodification } from "./lib/productionLotCodification";
+import { resolveProductionLotCodification, zoneNumberForCategory } from "./lib/productionLotCodification";
 
 type ProductNodeData = Record<string, unknown> & {
   product: Product;
@@ -51,6 +54,20 @@ type SelectionState = { type: "node"; id: string } | { type: "edge"; id: string 
 type DeleteCandidate = { type: "node"; id: string; label: string; affectedNodeCount: number } | { type: "edge"; id: string; label: string; affectedNodeCount: 0 };
 type ProductSidebarFilter = "semi_finished" | "raw";
 type SchemaSaveTarget = { productId: string; componentProductIds: string[]; depth: number };
+type ProductConfigurationDraft = {
+  name: string;
+  type: ProductType;
+  category: ProductCategory | "";
+  lotZone: string;
+  lotCode: string;
+};
+type ValidatedProductConfiguration = {
+  name: string;
+  type: ProductType;
+  category: ProductCategory | null;
+  lotZone: string;
+  lotCode: string;
+};
 
 const typeLabels: Record<ProductType, string> = {
   raw: "Matiere premiere",
@@ -63,6 +80,28 @@ const recipeLabels: Record<RecipeStatus, string> = {
   missing: "Recette manquante",
   not_required: "Non requis",
 };
+
+const categoryLabels: Record<ProductCategory, string> = {
+  beldi: "Beldi",
+  boulangerie: "Boulangerie",
+  cake: "Patisserie",
+  patisserie: "Patisserie",
+  viennoiserie: "Viennoiserie",
+};
+
+const manufacturedProductTypeOptions: Array<{ value: Exclude<ProductType, "raw">; label: string }> = [
+  { value: "semi_finished", label: typeLabels.semi_finished },
+  { value: "finished", label: typeLabels.finished },
+];
+
+const productCategoryOptions: Array<{ value: Exclude<ProductCategory, "cake">; label: string }> = [
+  { value: "beldi", label: categoryLabels.beldi },
+  { value: "boulangerie", label: categoryLabels.boulangerie },
+  { value: "patisserie", label: categoryLabels.patisserie },
+  { value: "viennoiserie", label: categoryLabels.viennoiserie },
+];
+
+const defaultProductCategory: ProductCategory = "patisserie";
 
 const nodeTypes = {
   product: ProductNode,
@@ -129,6 +168,7 @@ function FabricationDiagramWorkspaceInner({
   const [productSearch, setProductSearch] = useState("");
   const [productFilter, setProductFilter] = useState<ProductSidebarFilter>("semi_finished");
   const [isProductSidebarCollapsed, setIsProductSidebarCollapsed] = useState(initialProductSidebarCollapsed);
+  const [isConfigSidebarCollapsed, setIsConfigSidebarCollapsed] = useState(Boolean(initialTarget));
   const [stockByProductId, setStockByProductId] = useState<Record<string, LotStockPreview>>({});
   const [nodes, setNodes, onNodesChange] = useNodesState<ProductFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<ProductFlowEdge>([]);
@@ -138,21 +178,27 @@ function FabricationDiagramWorkspaceInner({
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
   const [deleteCandidate, setDeleteCandidate] = useState<DeleteCandidate | null>(null);
-  const [isCodificationPopoverOpen, setIsCodificationPopoverOpen] = useState(false);
-  const [codificationDraft, setCodificationDraft] = useState({ zone: "", code: "" });
-  const [codificationStatus, setCodificationStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
+  const [configurationDraft, setConfigurationDraft] = useState<ProductConfigurationDraft>({
+    name: "",
+    type: "semi_finished",
+    category: defaultProductCategory,
+    lotZone: "",
+    lotCode: "",
+  });
+  const [configurationStatus, setConfigurationStatus] = useState<"idle" | "saving" | "deleting" | "success" | "error">("idle");
+  const [productDeleteCandidate, setProductDeleteCandidate] = useState<Product | null>(null);
 
   const selectedNode = selected?.type === "node" ? nodes.find((node) => node.id === selected.id) ?? null : null;
   const selectedEdge = selected?.type === "edge" ? edges.find((edge) => edge.id === selected.id) ?? null : null;
-  const selectedCodificationProduct =
-    selectedNode && selectedNode.data.product.type !== "raw" ? selectedNode.data.product : null;
+  const configurationProduct = selectedNode?.data.product ?? targetProduct;
+  const isCreatingProduct = !configurationProduct;
+  const isConfiguringRawMaterial = configurationProduct?.type === "raw";
   const componentNodeCount = targetProduct ? nodes.filter((node) => !node.data.isTarget).length : 0;
   const schemaSaveTargets = useMemo(() => buildSchemaSaveTargets(targetProduct, nodes, edges), [edges, nodes, targetProduct]);
   const componentEdgeIds = schemaSaveTargets.find((target) => target.productId === targetProduct?.id)?.componentProductIds ?? [];
   const canSave = Boolean(targetProduct && componentEdgeIds.length > 0 && saveStatus !== "saving");
   const sidebarProducts = useMemo(() => {
-    const filteredByType =
-      productFilter === "semi_finished" ? products.filter((product) => product.type === "semi_finished") : products.filter((product) => product.type === "raw");
+    const filteredByType = products.filter((product) => product.type === productFilter);
     return filterProducts(filteredByType, productSearch);
   }, [productFilter, productSearch, products]);
 
@@ -210,27 +256,23 @@ function FabricationDiagramWorkspaceInner({
   }, [targetProduct?.id]);
 
   useEffect(() => {
-    if (!selectedCodificationProduct) {
-      setIsCodificationPopoverOpen(false);
-      setCodificationDraft({ zone: "", code: "" });
-      setCodificationStatus("idle");
-      return;
-    }
-
-    const resolvedCodification = resolveProductionLotCodification(selectedCodificationProduct);
-    setCodificationDraft({
-      zone: selectedCodificationProduct.lotZone ?? resolvedCodification?.zone ?? "",
-      code: selectedCodificationProduct.lotCode ?? resolvedCodification?.code ?? "",
+    const resolvedCodification = configurationProduct && configurationProduct.type !== "raw" ? resolveProductionLotCodification(configurationProduct) : null;
+    const category = configurationProduct?.category ?? defaultProductCategory;
+    setConfigurationDraft({
+      name: configurationProduct?.name ?? "",
+      type: configurationProduct?.type ?? "semi_finished",
+      category,
+      lotZone: zoneInputValue(configurationProduct?.lotZone ?? resolvedCodification?.zone ?? zoneNumberForCategory(category)),
+      lotCode: configurationProduct?.lotCode ?? resolvedCodification?.code ?? "",
     });
-    setCodificationStatus("idle");
+    setConfigurationStatus("idle");
   }, [
-    selectedCodificationProduct?.category,
-    selectedCodificationProduct?.code,
-    selectedCodificationProduct?.id,
-    selectedCodificationProduct?.lotCode,
-    selectedCodificationProduct?.lotZone,
-    selectedCodificationProduct?.name,
-    selectedCodificationProduct?.type,
+    configurationProduct?.category,
+    configurationProduct?.id,
+    configurationProduct?.lotCode,
+    configurationProduct?.lotZone,
+    configurationProduct?.name,
+    configurationProduct?.type,
   ]);
 
   async function loadTargetSchema(product: Product) {
@@ -278,7 +320,7 @@ function FabricationDiagramWorkspaceInner({
 
   async function addProductToCanvas(product: Product, position?: { x: number; y: number }) {
     if (!targetProduct) {
-      setMessage("Selectionnez d'abord un produit cible.");
+      setMessage("Creez d'abord le produit cible avec le panneau de configuration.");
       setSaveStatus("error");
       return;
     }
@@ -497,6 +539,9 @@ function FabricationDiagramWorkspaceInner({
       return;
     }
 
+    const configurationSaved = await saveExistingProductConfiguration(false);
+    if (!configurationSaved) return;
+
     const validationMessage = validateBeforeSave(targetProduct, nodes, edges);
     if (validationMessage) {
       setSaveStatus("error");
@@ -526,6 +571,7 @@ function FabricationDiagramWorkspaceInner({
       setEdges(savedEdges);
       setSaveStatus("success");
       setMessage("Schema enregistre.");
+      onBack();
     } catch (error) {
       logDevError("Schema save failed", error);
       setSaveStatus("error");
@@ -533,50 +579,168 @@ function FabricationDiagramWorkspaceInner({
     }
   }
 
-  async function handleSaveCodification(event: FormEvent<HTMLFormElement>) {
+  async function handleSaveProductConfiguration(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedCodificationProduct) return;
 
-    const lotZone = codificationDraft.zone.trim();
-    const lotCode = codificationDraft.code.trim().replace(/\s+/g, "");
+    const validated = validateProductConfigurationDraft(configurationProduct?.id ?? "");
+    if (!validated) return;
 
-    if (!lotZone || !lotCode) {
-      setCodificationStatus("error");
-      setSaveStatus("error");
-      setMessage("Zone et codification sont requises.");
+    if (!configurationProduct) {
+      setConfigurationStatus("saving");
+      setMessage("");
+
+      try {
+        const createdProduct = await createProductCatalogItem({
+          name: validated.name,
+          type: validated.type === "raw" ? "semi_finished" : validated.type,
+          category: validated.category ?? defaultProductCategory,
+          lotNumber: "",
+          lotZone: validated.lotZone,
+          lotCode: validated.lotCode,
+        });
+
+        await onSchemaSaved();
+        setTargetProduct(createdProduct);
+        setNodes([createProductNode(createdProduct, { x: 0, y: 0 }, true, stockByProductId[createdProduct.id] ?? null)]);
+        setEdges([]);
+        selectSchemaItem({ type: "node", id: createdProduct.id });
+        setConfigurationStatus("success");
+        setSaveStatus("success");
+        setMessage("Produit ajoute au schema.");
+        window.requestAnimationFrame(() => reactFlow.fitView({ padding: 0.35, duration: 120 }));
+      } catch (error) {
+        logDevError("Product creation failed", error);
+        setConfigurationStatus("error");
+        setSaveStatus("error");
+        setMessage(formatApiError(error, "Impossible de creer le produit."));
+      }
       return;
     }
 
-    const duplicateProduct = findProductWithMatchingCodification(products, selectedCodificationProduct.id, lotZone, lotCode);
-    if (duplicateProduct) {
-      setCodificationStatus("error");
+    await saveExistingProductConfiguration();
+  }
+
+  function validateProductConfigurationDraft(currentProductId: string): ValidatedProductConfiguration | null {
+    const name = configurationDraft.name.trim();
+    const type = configurationDraft.type;
+    const category = configurationDraft.category || null;
+    const lotZone = configurationDraft.lotZone.trim();
+    const lotCode = configurationDraft.lotCode.trim().replace(/\s+/g, "");
+
+    if (!name) {
+      setConfigurationStatus("error");
       setSaveStatus("error");
-      setMessage(`Codification deja utilisee par ${duplicateProduct.name}.`);
-      return;
+      setMessage("Nom du produit requis.");
+      return null;
     }
 
-    setCodificationStatus("saving");
+    if (type !== "raw") {
+      if (!category) {
+        setConfigurationStatus("error");
+        setSaveStatus("error");
+        setMessage("Categorie requise pour un produit fabrique.");
+        return null;
+      }
+
+      if (!lotZone || !lotCode) {
+        setConfigurationStatus("error");
+        setSaveStatus("error");
+        setMessage("Zone et codification sont requises.");
+        return null;
+      }
+
+      const duplicateProduct = findProductWithMatchingCodification(products, currentProductId, lotZone, lotCode);
+      if (duplicateProduct) {
+        setConfigurationStatus("error");
+        setSaveStatus("error");
+        setMessage(`Codification deja utilisee par ${duplicateProduct.name}.`);
+        return null;
+      }
+    }
+
+    return { name, type, category, lotZone, lotCode };
+  }
+
+  async function saveExistingProductConfiguration(refreshAfterSave = true) {
+    if (!configurationProduct) return true;
+    if (configurationProduct.type === "raw") return true;
+
+    const validated = validateProductConfigurationDraft(configurationProduct.id);
+    if (!validated) return false;
+
+    setConfigurationStatus("saving");
     setMessage("");
 
     try {
-      await updateProductLotCodification(selectedCodificationProduct.id, lotZone, lotCode);
-      applyProductCodification(selectedCodificationProduct.id, lotZone, lotCode);
-      await onSchemaSaved();
-      setCodificationDraft({ zone: lotZone, code: lotCode });
-      setIsCodificationPopoverOpen(false);
-      setCodificationStatus("success");
+      await updateProductCatalogItem(configurationProduct.id, {
+        name: validated.name,
+        type: validated.type,
+        category: validated.category,
+        unit: configurationProduct.unit,
+      });
+
+      if (validated.type !== "raw") await updateProductLotCodification(configurationProduct.id, validated.lotZone, validated.lotCode);
+
+      const nextUnit = validated.type === "finished" ? "unites" : validated.type === "semi_finished" ? "kg" : configurationProduct.unit;
+      applyProductConfiguration(configurationProduct.id, {
+        name: validated.name,
+        type: validated.type,
+        category: validated.category,
+        unit: nextUnit,
+        lotZone: validated.type === "raw" ? configurationProduct.lotZone : validated.lotZone,
+        lotCode: validated.type === "raw" ? configurationProduct.lotCode : validated.lotCode,
+      });
+      if (refreshAfterSave) await onSchemaSaved();
+      setConfigurationDraft((draft) => ({ ...draft, name: validated.name, lotZone: validated.lotZone, lotCode: validated.lotCode }));
+      setConfigurationStatus("success");
       setSaveStatus("success");
-      setMessage("Codification enregistree.");
+      if (refreshAfterSave) setMessage("Configuration enregistree.");
+      return true;
     } catch (error) {
-      logDevError("Product codification save failed", error);
-      setCodificationStatus("error");
+      logDevError("Product configuration save failed", error);
+      setConfigurationStatus("error");
       setSaveStatus("error");
-      setMessage(formatApiError(error, "Impossible d'enregistrer la codification."));
+      setMessage(formatApiError(error, "Impossible d'enregistrer la configuration."));
+      return false;
     }
   }
 
-  function applyProductCodification(productId: string, lotZone: string, lotCode: string) {
-    const patchProduct = (product: Product): Product => (product.id === productId ? { ...product, lotZone, lotCode } : product);
+  async function confirmDeleteConfiguredProduct() {
+    if (!productDeleteCandidate) return;
+
+    setConfigurationStatus("deleting");
+    setMessage("");
+
+    try {
+      await deleteProductCatalogItem(productDeleteCandidate.id);
+      await onSchemaSaved();
+      setConfigurationStatus("success");
+      setSaveStatus("success");
+      setMessage("Produit supprime.");
+
+      if (targetProduct?.id === productDeleteCandidate.id) {
+        setProductDeleteCandidate(null);
+        onBack();
+        return;
+      }
+
+      const removedNodeIds = getSubtreeNodeIds(productDeleteCandidate.id, edges);
+      removedNodeIds.add(productDeleteCandidate.id);
+      setNodes((currentNodes) => currentNodes.filter((node) => !removedNodeIds.has(node.id)));
+      setEdges((currentEdges) => currentEdges.filter((edge) => !removedNodeIds.has(edge.source) && !removedNodeIds.has(edge.target)));
+      selectSchemaItem(null);
+      setProductDeleteCandidate(null);
+    } catch (error) {
+      logDevError("Product delete failed", error);
+      setConfigurationStatus("error");
+      setSaveStatus("error");
+      setMessage(formatApiError(error, "Impossible de supprimer ce produit. Il est peut-etre utilise dans une recette ou un lot."));
+      setProductDeleteCandidate(null);
+    }
+  }
+
+  function applyProductConfiguration(productId: string, patch: Partial<Product>) {
+    const patchProduct = (product: Product): Product => (product.id === productId ? { ...product, ...patch } : product);
 
     setTargetProduct((currentTarget) => (currentTarget ? patchProduct(currentTarget) : currentTarget));
     setNodes((currentNodes) =>
@@ -611,51 +775,6 @@ function FabricationDiagramWorkspaceInner({
     <main className="diagram-fullscreen-page">
       <section className="diagram-canvas-card fullscreen">
         <div className="diagram-floating-actions">
-          <div className="codification-popover-wrapper">
-            <button
-              className="button secondary"
-              disabled={!selectedCodificationProduct || codificationStatus === "saving"}
-              onClick={() => setIsCodificationPopoverOpen((current) => !current)}
-              title={selectedCodificationProduct ? "Modifier la codification du lot" : "Selectionnez une carte produit"}
-              type="button"
-            >
-              Codification
-            </button>
-            {isCodificationPopoverOpen && selectedCodificationProduct ? (
-              <form className="codification-popover" onSubmit={handleSaveCodification}>
-                <div className="codification-popover-title">
-                  <span>Produit selectionne</span>
-                  <strong>{selectedCodificationProduct.name}</strong>
-                </div>
-                <label>
-                  <span>Zone number</span>
-                  <input
-                    autoComplete="off"
-                    value={codificationDraft.zone}
-                    onChange={(event) => setCodificationDraft((draft) => ({ ...draft, zone: event.target.value }))}
-                    placeholder="PBC02"
-                  />
-                </label>
-                <label>
-                  <span>Codification number</span>
-                  <input
-                    autoComplete="off"
-                    value={codificationDraft.code}
-                    onChange={(event) => setCodificationDraft((draft) => ({ ...draft, code: event.target.value }))}
-                    placeholder="PV"
-                  />
-                </label>
-                <div className="codification-popover-actions">
-                  <button className="button secondary" onClick={() => setIsCodificationPopoverOpen(false)} type="button">
-                    Annuler
-                  </button>
-                  <button className="button primary" disabled={codificationStatus === "saving"} type="submit">
-                    {codificationStatus === "saving" ? "..." : "Enregistrer"}
-                  </button>
-                </div>
-              </form>
-            ) : null}
-          </div>
           <span className={`diagram-status ${schemaStatus}`}>
             {schemaStatus === "loading" ? <TraceabilityLoader compact label="Chargement" /> : `${componentEdgeIds.length} lien(s)`}
           </span>
@@ -663,11 +782,114 @@ function FabricationDiagramWorkspaceInner({
             Retour
           </button>
           <button className="button primary" disabled={!canSave} onClick={handleSaveSchema} type="button">
-            {saveStatus === "saving" ? <TraceabilityLoader compact label="Enregistrement..." /> : "Enregistrer schema"}
+            {saveStatus === "saving" ? <TraceabilityLoader compact label="Enregistrement..." /> : "Enregistrer"}
           </button>
         </div>
 
         {message ? <p className={`save-message ${saveStatus === "error" ? "error" : "success"} diagram-floating-message`}>{message}</p> : null}
+
+        <aside className={cx("diagram-floating-config", isConfigSidebarCollapsed && "collapsed")}>
+          <button
+            aria-label={isConfigSidebarCollapsed ? "Afficher la configuration" : "Masquer la configuration"}
+            className="diagram-config-toggle"
+            onClick={() => setIsConfigSidebarCollapsed((current) => !current)}
+            title={isConfigSidebarCollapsed ? "Configuration" : "Masquer"}
+            type="button"
+          >
+            <ConfigurationIcon />
+          </button>
+          <form className="diagram-config-body" onSubmit={handleSaveProductConfiguration}>
+            <label>
+              <span>Nom du produit</span>
+              <input
+                autoComplete="off"
+                disabled={isConfiguringRawMaterial || configurationStatus === "saving" || configurationStatus === "deleting"}
+                onChange={(event) => setConfigurationDraft((draft) => ({ ...draft, name: event.target.value }))}
+                value={configurationDraft.name}
+              />
+            </label>
+
+            <label>
+              <span>Type</span>
+              {isConfiguringRawMaterial ? (
+                <div className="select-readonly">{typeLabels.raw}</div>
+              ) : (
+                <select
+                  disabled={configurationStatus === "saving" || configurationStatus === "deleting"}
+                  onChange={(event) => setConfigurationDraft((draft) => ({ ...draft, type: event.target.value as ProductType }))}
+                  value={configurationDraft.type}
+                >
+                  {manufacturedProductTypeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </label>
+
+            <label>
+              <span>Categorie</span>
+              <select
+                disabled={isConfiguringRawMaterial || configurationStatus === "saving" || configurationStatus === "deleting"}
+                onChange={(event) => {
+                  const category = event.target.value as ProductCategory;
+                  setConfigurationDraft((draft) => ({ ...draft, category, lotZone: zoneNumberForCategory(category) }));
+                }}
+                value={configurationDraft.category}
+              >
+                {productCategoryOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="diagram-config-split">
+              <label>
+                <span>Zone number</span>
+                <input
+                  autoComplete="off"
+                  disabled={isConfiguringRawMaterial || configurationStatus === "saving" || configurationStatus === "deleting"}
+                  inputMode="numeric"
+                  maxLength={2}
+                  onChange={(event) => setConfigurationDraft((draft) => ({ ...draft, lotZone: zoneInputValue(event.target.value) }))}
+                  value={configurationDraft.lotZone}
+                />
+              </label>
+              <label>
+                <span>Codification number</span>
+                <input
+                  autoComplete="off"
+                  disabled={isConfiguringRawMaterial || configurationStatus === "saving" || configurationStatus === "deleting"}
+                  onChange={(event) => setConfigurationDraft((draft) => ({ ...draft, lotCode: event.target.value }))}
+                  value={configurationDraft.lotCode}
+                />
+              </label>
+            </div>
+
+            <div className="diagram-config-footer">
+              {configurationProduct ? (
+                <button
+                  className="button danger"
+                  disabled={configurationStatus === "saving" || configurationStatus === "deleting"}
+                  onClick={() => {
+                    setProductDeleteCandidate(configurationProduct);
+                  }}
+                  type="button"
+                >
+                  {configurationStatus === "deleting" ? "Suppression..." : "Supprimer produit"}
+                </button>
+              ) : null}
+              {isCreatingProduct ? (
+                <button className="button primary" disabled={configurationStatus === "saving" || configurationStatus === "deleting"} type="submit">
+                  {configurationStatus === "saving" ? <TraceabilityLoader compact label="Ajout..." /> : "Add"}
+                </button>
+              ) : null}
+            </div>
+          </form>
+        </aside>
 
         <aside className={isProductSidebarCollapsed ? "diagram-floating-target collapsed" : "diagram-floating-target"}>
           <button
@@ -692,7 +914,6 @@ function FabricationDiagramWorkspaceInner({
             <ProductSidebarList
               mode={productFilter}
               products={sidebarProducts}
-              stockByProductId={stockByProductId}
               targetProduct={targetProduct}
               onAddComponent={addProductToCanvas}
             />
@@ -725,13 +946,20 @@ function FabricationDiagramWorkspaceInner({
         >
           <Background color="var(--diagram-grid-dot)" gap={20} size={1.45} />
           <Controls position="bottom-right" />
-          <MiniMap nodeColor={miniMapNodeColor} pannable zoomable />
         </ReactFlow>
         {!targetProduct ? <div className="diagram-empty">Selectionnez un produit cible pour commencer.</div> : null}
         {targetProduct && componentNodeCount === 0 ? <div className="diagram-empty">Ajoutez des composants depuis la recherche flottante.</div> : null}
       </section>
       {deleteCandidate ? (
         <DeleteConfirmationDialog candidate={deleteCandidate} onCancel={() => setDeleteCandidate(null)} onConfirm={confirmDeleteSelected} />
+      ) : null}
+      {productDeleteCandidate ? (
+        <ProductDeleteConfirmationDialog
+          product={productDeleteCandidate}
+          isDeleting={configurationStatus === "deleting"}
+          onCancel={() => setProductDeleteCandidate(null)}
+          onConfirm={() => void confirmDeleteConfiguredProduct()}
+        />
       ) : null}
     </main>
   );
@@ -743,6 +971,15 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
       <rect className="toggle-icon-frame" height="16" rx="4" width="18" x="3" y="4" />
       <path className="toggle-icon-panel" d="M9 4v16" />
       <path className="toggle-icon-arrow" d={collapsed ? "M13 9l3 3-3 3" : "M16 9l-3 3 3 3"} />
+    </svg>
+  );
+}
+
+function ConfigurationIcon() {
+  return (
+    <svg aria-hidden="true" className="diagram-sidebar-toggle-icon" fill="none" viewBox="0 0 24 24">
+      <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.37a1.7 1.7 0 0 0-1 .55V20a2 2 0 0 1-4 0v-.08a1.7 1.7 0 0 0-1-.55 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.63 15a1.7 1.7 0 0 0-.55-1H4a2 2 0 0 1 0-4h.08a1.7 1.7 0 0 0 .55-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.63a1.7 1.7 0 0 0 1-.55V4a2 2 0 0 1 4 0v.08a1.7 1.7 0 0 0 1 .55 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.37 9c.08.36.27.7.55 1H20a2 2 0 0 1 0 4h-.08a1.7 1.7 0 0 0-.52 1Z" />
     </svg>
   );
 }
@@ -768,20 +1005,18 @@ function ProductSidebarList({
   products,
   mode,
   targetProduct,
-  stockByProductId,
   onAddComponent,
 }: {
   products: Product[];
   mode: ProductSidebarFilter;
   targetProduct: Product | null;
-  stockByProductId: Record<string, LotStockPreview>;
   onAddComponent: (product: Product) => void | Promise<void>;
 }) {
   return (
     <div className="diagram-product-list">
       {products.map((product) => {
         const isCurrentTarget = product.id === targetProduct?.id;
-        const disabled = !targetProduct || isCurrentTarget;
+        const disabled = !targetProduct || isCurrentTarget || product.type === "finished";
         const handleClick = () => {
           if (disabled) return;
           void onAddComponent(product);
@@ -806,7 +1041,6 @@ function ProductSidebarList({
               <span>{product.code}</span>
               <div className="component-meta">
                 <span className={`type-pill ${product.type}`}>{typeLabels[product.type]}</span>
-                <span>{formatStockPreview(stockByProductId[product.id])}</span>
               </div>
             </div>
           </button>
@@ -851,6 +1085,43 @@ function DeleteConfirmationDialog({
           </button>
           <button className="button danger-soft" onClick={onConfirm} type="button">
             Supprimer
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProductDeleteConfirmationDialog({
+  product,
+  isDeleting,
+  onCancel,
+  onConfirm,
+}: {
+  product: Product;
+  isDeleting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div aria-labelledby="product-delete-title" aria-modal="true" className="app-dialog-overlay modal" role="dialog">
+      <button aria-label="Annuler la suppression" className="app-dialog-backdrop" onClick={onCancel} type="button" />
+      <section className="app-dialog-surface modal diagram-delete-dialog">
+        <div className="app-dialog-header">
+          <h2 id="product-delete-title">Supprimer produit</h2>
+        </div>
+        <div className="app-dialog-body">
+          <p>
+            Supprimer <strong>{product.name}</strong> du catalogue ?
+          </p>
+          <p className="dialog-muted-text">Cette action peut etre refusee si le produit est encore utilise dans une recette, un lot ou une reception.</p>
+        </div>
+        <div className="app-dialog-footer">
+          <button className="button secondary" disabled={isDeleting} onClick={onCancel} type="button">
+            Annuler
+          </button>
+          <button className="button danger-soft" disabled={isDeleting} onClick={onConfirm} type="button">
+            {isDeleting ? "Suppression..." : "Supprimer"}
           </button>
         </div>
       </section>
@@ -1362,6 +1633,15 @@ function normalizeCodificationKey(lotZone: string, lotCode: string) {
   return normalizedZone && normalizedCode ? `${normalizedZone}:${normalizedCode}` : "";
 }
 
+function zoneInputValue(value: string | null | undefined) {
+  const compactZone = (value ?? "").trim().toUpperCase().replace(/\s+/g, "").replace(/-/g, "");
+  const pbcZone = compactZone.match(/^PBC(\d{1,2})$/);
+  if (pbcZone) return pbcZone[1].padStart(2, "0");
+  const numericZone = compactZone.match(/^(\d{1,2})$/);
+  if (numericZone) return numericZone[1].padStart(2, "0");
+  return compactZone.replace(/\D/g, "").slice(0, 2);
+}
+
 function normalizeCodificationZone(lotZone: string) {
   const compactZone = lotZone.trim().toUpperCase().replace(/\s+/g, "").replace(/-/g, "");
   const pbcZone = compactZone.match(/^PBC(\d{1,2})$/);
@@ -1379,10 +1659,8 @@ function logDevError(message: string, error: unknown) {
   }
 }
 
-function miniMapNodeColor(node: ProductFlowNode) {
-  if (node.data.product.type === "finished") return "#3fcf8e";
-  if (node.data.product.type === "semi_finished") return "#7a5c06";
-  return "#216fe6";
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
 }
 
 function formatStockPreview(stock: LotStockPreview | null | undefined) {

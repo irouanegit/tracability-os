@@ -140,6 +140,7 @@ fn open_file_with_system_viewer(path: &PathBuf) -> Result<std::process::ExitStat
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             save_pdf_to_downloads,
             open_pdf_file

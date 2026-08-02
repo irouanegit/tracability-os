@@ -7,7 +7,7 @@ alter table products drop constraint if exists products_category_check;
 alter table products add constraint products_category_check
   check (
     category is null
-    or category in ('beldi', 'boulangerie', 'cake', 'patisserie', 'viennoiserie')
+    or category in ('beldi', 'boulangerie', 'patisserie', 'viennoiserie')
   );
 
 alter table recipe_components alter column quantity drop not null;

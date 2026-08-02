@@ -158,7 +158,7 @@ function groupLotsByProductId(rows: ProductionConsumptionDetail[]) {
   const lotsByProductId = new Map<string, ProductionTraceabilityLot[]>();
 
   rows.forEach((row) => {
-    const productLots = lotsByProductId.get(row.productId) ?? [];
+    const productLots = lotsByProductId.get(row.expectedProductId) ?? [];
     if (!productLots.some((lot) => lot.lotId === row.lotId)) {
       productLots.push({
         lotId: row.lotId,
@@ -166,9 +166,15 @@ function groupLotsByProductId(rows: ProductionConsumptionDetail[]) {
         supplierLot: row.supplierLot,
         sourceType: row.sourceType,
         lotCreatedAt: row.lotCreatedAt,
+        productId: row.productId,
+        productName: row.productName,
+        productType: row.productType,
+        productCategory: row.category,
+        expectedProductId: row.expectedProductId,
+        expectedProductName: row.expectedProductName,
       });
     }
-    lotsByProductId.set(row.productId, productLots);
+    lotsByProductId.set(row.expectedProductId, productLots);
   });
 
   return lotsByProductId;
@@ -234,7 +240,7 @@ function buildSavedGraph(snapshot: ProductionTraceabilitySnapshot) {
       createFlowNode(
         diagramNode.id,
         diagramNode.position,
-        isRoot ? snapshot.root.productName : component.productName,
+        isRoot ? snapshot.root.productName : displayTraceabilityNodeName(component),
         isRoot ? snapshot.root.productType : component.productType,
         lots,
         isRoot,
@@ -316,7 +322,7 @@ function layoutTraceabilityBranches(
       y: nodeY,
     };
 
-    nodes.push(createFlowNode(branch.node.nodeId, nodePosition, branch.node.productName, branch.node.productType, branch.node.lots, false));
+    nodes.push(createFlowNode(branch.node.nodeId, nodePosition, displayTraceabilityNodeName(branch.node), branch.node.productType, branch.node.lots, false));
     edges.push(createFlowEdge(`${parentNodeId}->${branch.node.nodeId}`, parentNodeId, branch.node.nodeId));
 
     layoutTraceabilityBranches(branch.node.nodeId, nodePosition, branch.children, depth + 1, nodes, edges);
@@ -338,6 +344,11 @@ function createFlowNode(
     position,
     data: { productName, productType, lots: uniqueLots(lots), isRoot },
   };
+}
+
+function displayTraceabilityNodeName(node: ProductionTraceabilityNode) {
+  if (node.productType !== "raw") return node.productName;
+  return node.lots[0]?.productName || node.productName;
 }
 
 function createFlowEdge(id: string, source: string, target: string): TraceabilityFlowEdge {

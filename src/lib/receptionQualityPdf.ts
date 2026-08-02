@@ -196,9 +196,12 @@ function drawTableHeader(page: PdfRenderPage, tableTop: number) {
   drawRect(page, x, headerBottom, tableWidth, topHeaderHeight + secondHeaderHeight, { fill: "0.92 0.92 0.92" });
   drawLine(page, groupedHeaderStart, splitY, x + tableWidth, splitY);
 
+  const groupedInnerKeys = new Set(["temperatureConforme", "temperatureNonConforme", "hygieneNonConforme"]);
+
   let currentX = x;
   for (const column of columns) {
-    drawLine(page, currentX, headerBottom, currentX, tableTop);
+    const lineTop = groupedInnerKeys.has(column.key) ? splitY : tableTop;
+    drawLine(page, currentX, headerBottom, currentX, lineTop);
     currentX += column.width;
   }
   drawLine(page, x + tableWidth, headerBottom, x + tableWidth, tableTop);
@@ -323,12 +326,13 @@ function drawHeaderLabel(page: PdfRenderPage, column: PdfColumn, centerX: number
 }
 
 function drawCenteredHeaderLines(page: PdfRenderPage, lines: string[], centerX: number, y: number, height: number, size: number) {
-  const lineGap = size + 2.2;
-  const blockHeight = size + lineGap * (lines.length - 1);
-  const firstBaseline = y + (height - blockHeight) / 2 + size;
+  const lineGap = size * 1.15;
+  const count = lines.length;
+  const midpointY = y + height / 2 + size * 0.22;
 
   lines.forEach((line, index) => {
-    drawText(page, line, centerX, firstBaseline + lineGap * (lines.length - 1 - index), size, "bold", "center");
+    const lineY = midpointY + ((count - 1) / 2 - index) * lineGap;
+    drawText(page, line, centerX, lineY, size, "bold", "center");
   });
 }
 
@@ -353,8 +357,9 @@ function fitText(value: string, maxWidth: number, size: number) {
   return fittedText ? `${fittedText}${ellipsis}` : "";
 }
 
-function textWidth(value: string, size: number) {
-  return value.length * size * 0.48;
+function textWidth(value: string, size: number, font: "regular" | "bold" | "italic" = "regular") {
+  const factor = font === "bold" ? 0.55 : 0.49;
+  return value.length * size * factor;
 }
 
 function drawText(
@@ -367,7 +372,7 @@ function drawText(
   align: "left" | "center" | "right" = "left",
 ) {
   const text = sanitizeText(value);
-  const textX = align === "center" ? x - textWidth(text, size) / 2 : align === "right" ? x - textWidth(text, size) : x;
+  const textX = align === "center" ? x - textWidth(text, size, font) / 2 : align === "right" ? x - textWidth(text, size, font) : x;
   const fontName = font === "bold" ? "F2" : font === "italic" ? "F3" : "F1";
   page.commands.push(`BT /${fontName} ${size} Tf ${number(textX)} ${number(y)} Td (${escapePdfText(text)}) Tj ET`);
 }
