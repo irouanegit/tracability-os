@@ -1966,16 +1966,13 @@ function DeliveryModule({
     setSaveStatus("saving");
     setMessage("");
     try {
-      const deliveryId = await confirmDelivery({
+      await confirmDelivery({
         deliveryDate,
         storeName,
         deliveryNumber,
         items,
       });
-      const nextDeliveries = await loadDeliveryHistory();
-      if (nextDeliveries.some((delivery) => delivery.id === deliveryId)) {
-        setWorkspaceDeliveryIds((current) => (current.includes(deliveryId) ? current : [...current, deliveryId]));
-      }
+      await loadDeliveryHistory();
       setConfirmedProductIds([]);
       setSaveStatus("success");
       setMessage(`La livraison ${deliveryNumber} de ${storeName} a ete confirmee avec ${items.length} produit(s).`);
@@ -2063,18 +2060,6 @@ function DeliveryModule({
                 >
                   <AppIcon name="trash" />
                 </AppButton>
-                {isDeliveryHistorySelectionMode ? (
-                  <AppButton
-                    className="delivery-history-delete-button"
-                    compact
-                    disabled={selectedHistoryDeliveryIds.length === 0}
-                    onClick={requestDeleteSelectedDeliveries}
-                    type="button"
-                    variant="danger"
-                  >
-                    Supprimer
-                  </AppButton>
-                ) : null}
               </div>
             </div>
           </div>
@@ -5020,7 +5005,7 @@ function ProductionComponentSubstitutionDropdown<T extends string>({
           {selectedOption?.label ?? "Selectionner"}
         </button>
       ) : (
-        <strong className="production-component-substitution-label">{selectedOption?.label ?? "Selectionner"}</strong>
+        <span className="production-component-substitution-label">{selectedOption?.label ?? "Selectionner"}</span>
       )}
       <button
         aria-expanded={isOpen}

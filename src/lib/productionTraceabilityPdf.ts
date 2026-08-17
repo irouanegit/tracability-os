@@ -103,6 +103,7 @@ const pageMargin = 28;
 const contentWidth = a4Landscape.width - pageMargin * 2;
 const missingValue = "A completer";
 const applicationDate = "13/07/2026";
+const deliveryApplicationDate = "18/08/2026";
 const pdfLogoWidth = 520;
 const pdfLogoHeight = 180;
 
@@ -653,7 +654,6 @@ export function renderDeliveryBatchPdf(items: DeliveryPdfData[], logoImage: PdfI
     pages.push(page);
   }
 
-  pages.forEach((page) => drawFooter(page, pages.length));
   return buildPdfFile(pages, logoImage ? [logoImage] : []);
 }
 
@@ -675,23 +675,40 @@ function drawDeliveryPage(page: PdfRenderPage, data: DeliveryPdfData, logoImage:
   }
 
   drawRect(page, pageMargin + logoWidth, top - headerHeight, titleWidth, headerHeight);
-  drawText(page, "BON DE LIVRAISON", pageMargin + logoWidth + titleWidth / 2, top - 24, 17, "bold", "center");
-  drawText(page, "Produits finis confirmes", pageMargin + logoWidth + titleWidth / 2, top - 43, 9, "regular", "center");
+  drawText(page, "FICHE TRACABILITE", pageMargin + logoWidth + titleWidth / 2, top - 34, 17, "bold", "center");
 
   const metaX = pageMargin + logoWidth + titleWidth;
   drawRect(page, metaX, top - headerHeight, metaWidth, headerHeight);
   drawText(page, "CASA FT-01", metaX + 9, top - 18, 10, "bold");
   drawLine(page, metaX, top - 28, metaX + metaWidth, top - 28);
-  drawText(page, `Date : ${formatFrenchDate(new Date(data.delivery.deliveryDate))}`, metaX + 9, top - 46, 9, "regular");
+  drawText(page, `Date d'application : ${deliveryApplicationDate}`, metaX + 9, top - 46, 8.2, "regular");
 
   const infoY = top - headerHeight - 18;
   drawText(page, `Magasin : ${data.delivery.storeName}`, pageMargin, infoY, 8, "bold");
-  drawText(page, `Livraison : No ${data.delivery.deliveryNumber}`, pageMargin + 205, infoY, 8, "regular");
+  drawText(page, `Date : ${formatFrenchDate(new Date(data.delivery.deliveryDate))}`, pageMargin + 230, infoY, 8, "regular");
   drawText(page, `Produits : ${data.items.length}`, pageMargin + 405, infoY, 8, "bold");
 
   const tableTop = infoY - 18;
-  const tableBottom = pageMargin + 18;
+  const tableBottom = deliverySignatureTopY() + 12;
   drawDeliveryItemsTable(page, data.items, tableTop, tableBottom, deliveryTableWidth, deliveryTableMargin);
+  drawDeliverySignatureAreas(page, deliveryTableMargin, deliveryTableWidth);
+}
+
+function deliverySignatureTopY() {
+  return pageMargin + 42;
+}
+
+function drawDeliverySignatureAreas(page: PdfRenderPage, x: number, width: number) {
+  const gap = 20;
+  const signatureY = pageMargin - 2;
+  const signatureHeight = deliverySignatureTopY() - signatureY;
+  const signatureWidth = (width - gap) / 2;
+  const rightX = x + signatureWidth + gap;
+
+  drawRect(page, x, signatureY, signatureWidth, signatureHeight);
+  drawRect(page, rightX, signatureY, signatureWidth, signatureHeight);
+  drawText(page, "Visa client", x + 9, signatureY + signatureHeight - 13, 8, "bold");
+  drawText(page, "Visa R. Q", rightX + 9, signatureY + signatureHeight - 13, 8, "bold");
 }
 
 function drawDeliveryItemsTable(
