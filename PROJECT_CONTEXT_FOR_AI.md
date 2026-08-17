@@ -10,7 +10,7 @@ Use it as context before touching code, SQL imports, Supabase policies, release 
 - Domain: bakery/pastry production traceability for Casabianca.
 - Main workspace path: `C:\Users\user\myprojects\solution traçabilité`
 - Current app type: Tauri desktop app with a React/Vite frontend and Supabase backend.
-- Current release line: `0.1.16` at the time this document was written.
+- Current source version: `0.1.30` at the time this document was last updated.
 - Current NSIS installer path pattern:
   `src-tauri\target\release\bundle\nsis\Tracability OS_<version>_x64-setup.exe`
 
@@ -426,6 +426,9 @@ Confirm-lots view:
 - Confirming lots should keep the user on the same screen, not jump back to history.
 - Duplicate production confirmations are allowed.
 - `Eau` is an exception: production can be confirmed even if water has no selected lot.
+- Component substitutions are allowed only through explicit substitution groups. Current groups include chocolate, colorant, biscuit, pistolet, coulis, croquant, ganache, glacage, insert, mousse, silicone, and sirop families.
+- Chocolate substitution includes `Chocolat aiguebelle 72%`.
+- Semi-finished substitution UI should stay compact: show the semi-finished name normally and use a small circled dropdown arrow for changing the substituted component. The product name itself remains clickable for navigation into that component.
 
 Confirm-lots table:
 
@@ -437,6 +440,10 @@ Confirm-lots table:
 - Finished badges are green.
 - Semi-finished components with their own schema are collapsible; their child rows appear below.
 - Child rows must use `Lot` semantics too, not `Lot interne` as a visible mistake.
+- If a substituted semi-finished component is selected, its child rows must come from the selected substitute schema, not the original expected schema.
+- Substitution selections must be scoped by component node/row key. Do not key only by product id or product name, because the same raw/semi-finished product may appear under two different parent semi-finished rows.
+- Confirmed preview/schema must display the saved confirmed lots, not only the current active blueprint lots.
+- Confirmed preview/schema supplier display should use the real reception supplier name when available. `Production interne` is only for fabrication lots.
 
 Production history:
 
@@ -449,6 +456,8 @@ Production history:
   - Workspace actions such as PDF export apply only to items in the workspace.
 - The user later changed their mind about deletion: do not add a remove/delete action to production history unless they ask again.
 - There is a checkbox-selection mode in product history. Its toggle uses a trash/dumpster icon and light red style, and checkboxes are red.
+- Production history row selection and double-click into the workspace were optimized. Avoid reintroducing full-detail loads for simple row selection; fetch heavy traceability details only when a preview/schema/export actually needs them.
+- Exported row highlighting was removed from production history; do not bring back the green/blue exported-row background unless requested.
 
 ## Production Traceability Diagram
 
@@ -469,6 +478,8 @@ Rules:
 - Current zoom should allow zooming out significantly (`minZoom` low, such as `0.05`).
 - Link color comes from `var(--diagram-link)` so it can be black in light theme and light in dark theme.
 - Production schema can be built from a confirmed batch `traceability_snapshot` or from current schema/component rows.
+- For confirmed batches, prefer the saved `traceability_snapshot` and hydrate it with consumption rows when needed. This preserves historical lots even if the active schema later changes.
+- Snapshot lots may need supplier-name hydration. See migrations `027_production_consumption_supplier_name.sql` and `028_repair_production_detail_snapshot_sources.sql`.
 
 When new imported data does not follow the leaf-slot pattern, do not immediately blame React Flow. Inspect:
 
@@ -684,6 +695,10 @@ Scripts mentioned frequently:
 - `supabase/scripts/fix_creme_caramel_raw_material.sql`
 - `supabase/scripts/add_delete_product_catalog_item_function.sql`
 - `supabase/migrations/016_user_audit_tracking.sql`
+- `supabase/migrations/025_add_chocolat_aiguebelle_to_chocolate_substitution.sql`
+- `supabase/migrations/026_planification_planned_time.sql`
+- `supabase/migrations/027_production_consumption_supplier_name.sql`
+- `supabase/migrations/028_repair_production_detail_snapshot_sources.sql`
 
 When the user gets SQL errors like:
 
@@ -718,9 +733,10 @@ When uncertain, ask a focused question. When the request is clear, implement.
 
 At the time this file was last updated:
 
-- App version: `0.1.18`.
+- App version: `0.1.30`.
 - Current installer path:
-  `C:\Users\user\myprojects\solution traçabilité\src-tauri\target\release\bundle\nsis\Tracability OS_0.1.18_x64-setup.exe`
+  `C:\Users\user\myprojects\solution traçabilité\src-tauri\target\release\bundle\nsis\Tracability OS_0.1.30_x64-setup.exe`
+- Current source version expected for the next installer: `0.1.30`.
 - The app uses a custom Node Schema Cherry logo generated from `app-icon.png` (a user-approved design: a green circle with a Y-shaped stem on dark background, representing cherry + schema nodes).
 - All icon sizes were generated via `npm run tauri icon app-icon.png` and placed in `src-tauri/icons/`.
 - `tauri.conf.json` now includes a `"bundle"` section with `"icon"` array and `"targets": ["nsis"]`.
@@ -729,10 +745,10 @@ At the time this file was last updated:
 
 Recent UI changes included:
 
-- **Exported row highlighting**: Production history and reception history table rows that have been exported (PDF generated) are highlighted in blue using CSS class `exported-row`.
+- **Exported row highlighting**: Reception history may use exported-row styling. Production history exported-row highlighting was removed by request and must not be reintroduced unless asked.
 - **Production history selection toggle** uses a trash/dumpster icon with light red styling. Checkboxes are red.
 - **Lots & Traçabilité screen** built (see dedicated section below).
-- **Planification screen** set to empty "coming soon" mode using `<EmptyModule>` (see dedicated section below).
+- **Planification screen** is active: configuration widget, details widget, and a full-width React Flow timeline widget are in place.
 
 Recent audit/security work included:
 
@@ -750,6 +766,24 @@ Recent production behavior included:
 - Duplicate lot confirmations allowed.
 - Water lot exception allowed.
 - Confirming lots should keep the user in the same screen.
+- Production confirm-lots supports substitution groups for raw materials and semi-finished components. Current groups include chocolate, colorant, biscuit, pistolet, coulis, croquant, ganache, glacage, insert, mousse, silicone, and sirop. Chocolate includes `Chocolat aiguebelle 72%`.
+- Substitution semi-fini rows should show a normal clickable product name with a small circled dropdown arrow, not a full-width combobox. Clicking the name should still navigate to that product.
+- Substitution selections must be keyed by the component row/node identity, not only by product id or normalized name. The same substitute family can appear multiple times in one recipe, and changing one row must not change another row.
+- Confirmed batch preview/schema must display the saved confirmed component lots and actual supplier names when available, not just current active schema rows.
+
+### Latest Handoff Update - Planification Audit
+
+The latest planification audit did not find an immediate blocker for manual production confirmation, but it found script drift and workflow risks that future work must handle carefully:
+
+- Active runtime is `PlanificationModuleV2` in `src/App.tsx`. The older `PlanificationModule` still exists as legacy compiled code and should not be treated as the current source of truth.
+- Manual production confirmation remains separated from planification. `createProductionWithTraceability` uses `create_production_with_traceability_v3` only when a `planId` is present; ad-hoc production still uses the existing v2/v1 path.
+- `tests/planningEngine.test.ts` currently passes with `npm.cmd run test:planning` (15/15), including same-day planned-time ordering.
+- Critical risk: `supabase/scripts/rebuild_traceability_schema.sql` is still date-only for plan dependency validation. It compares only planned dates and can undo the `planned_time` safeguards if rerun without updating it or reapplying migration 026 afterward.
+- Critical risk: `supabase/scripts/verify_production_planification.sql` is also date-only for invalid dependency checks. It can falsely pass same-day child-after-parent conflicts.
+- `supabase/migrations/026_planification_planned_time.sql` is required for the current workflow and was untracked in the latest `git status`; make sure it is committed before relying on GitHub releases or onboarding another device.
+- Source-plan dropdown UX can show a semi-fini source series that is generally valid but incompatible with some generated parent occurrences. Save catches it later; a better future fix is prevalidating each series against the generated schedule and labelling or hiding incompatible series.
+- Raw material lot eligibility is currently date-level, not time-level. This is acceptable only if reception lots are considered available for the whole day. If the business needs reception time ordering, add an `effective_at` timestamp.
+- The current materialized planning horizon is capped at 90 days. Long-term production use needs an extension or refresh strategy.
 
 ## Lots & Traçabilité Screen
 
@@ -789,44 +823,11 @@ A global registry and lot history viewer for all products and raw materials. Sho
 
 - Raw materials initially all showed `50 livraison(s)` because the count logic was incorrectly counting all reception batches instead of only those containing the specific raw material. Fixed by filtering `receptionBatches` to only count batches where `batch.items.some(item => item.productId === product.id)`.
 
-## Legacy Planification Notes (Obsolete)
+## Legacy Planification Notes (Removed)
 
-The following subsection documents the abandoned localStorage auto-confirm prototype. It is retained only as historical context. It is not the current Planification implementation and must not be reconnected to the runtime.
+The abandoned localStorage scheduler prototype was removed. Do not reintroduce `src/lib/schedulerEngine.ts`, `src/lib/schedulerResolver.ts`, `RuleEditModal`, `AutomationNotificationBanner`, or `planification.rules` localStorage behavior.
 
-View ID: `"planification"`.
-Component: `PlanificationModule` in `src/App.tsx` (around line 5916).
-Sidebar nav item: `{ id: "planification", label: "Planification", icon: "calendar" }`.
-
-### Current State
-
-The Planification screen is currently in **empty/coming-soon mode**. The `PlanificationModule` component returns `<EmptyModule activeView={activeView} />` which shows an empty state with just the nav label. The user explicitly requested: "dont add anything just keep the screen empty."
-
-### Backend Engine (Built but Hidden)
-
-The scheduler engine and resolver are fully implemented but not exposed in the UI:
-
-- `src/lib/schedulerEngine.ts`: Types (`ScheduledRule`, `ExecutionLog`, `AutomationNotification`, `ScheduleFrequency`) and date/interval calculation functions (`computeNextRunAt`, `findDueRules`, `formatFrequencyLabel`).
-- `src/lib/schedulerResolver.ts`: Bottom-up recipe tree lot resolver algorithm. Executes a scheduled rule by resolving the product's recipe tree, finding the latest lots for each component, and calling `createProductionWithTraceability`.
-
-### Algorithm Design Decisions (User-Approved)
-
-These decisions were confirmed through a Q&A with the user:
-
-1. **Scope**: Production confirmation only (not reception). Example: "Baguette ancienne" (produit fini) gets produced every day, so the user sets it to auto-confirm daily. Its semi-fini "pate special" is produced every 2 days, so pate special lot 1 feeds into Baguette ancienne lots 1 and 2.
-2. **Missing lot handling**: Skip the auto-confirmation and notify the user with a warning (option A). Do not auto-confirm without lots.
-3. **Lot code generation**: Auto-generated using existing codification rules in `productionLotCodification.ts`.
-4. **Responsible name**: `"Planification auto"` (hardcoded in the resolver).
-5. **Frequency options**: `daily`, `weekdays`, `every_n_days`, `specific_days`.
-
-### State Storage
-
-Scheduler state is stored in `usePersistentState` (localStorage):
-
-- `planification.rules`: `ScheduledRule[]`
-- `planification.logs`: `ExecutionLog[]`
-- `planification.notifications`: `AutomationNotification[]`
-
-The `AppShell` component has a `useEffect` that checks for due rules on mount and runs them automatically, posting notifications.
+The current Planification workflow is Supabase-backed. Auto-confirmation is performed by the guarded app-level runner in `src/App.tsx`, and the final duplicate protection lives in the database RPC `create_production_with_traceability_v3`.
 
 ## Planification (Current Supabase Implementation)
 
@@ -834,24 +835,26 @@ View ID: `"planification"`.
 
 Primary files:
 
-- `src/App.tsx`: `PlanificationModule` and integration with the existing Production Confirm Lots workflow.
-- `src/lib/planningEngine.ts`: date-only recurrence expansion and child-occurrence matching.
+- `src/App.tsx`: `PlanificationModule`, integration with the existing Production Confirm Lots workflow, and the guarded app-level auto-confirm runner.
+- `src/lib/planningEngine.ts`: recurrence expansion and date+time child-occurrence matching.
 - `src/lib/traceabilityApi.ts`: plan, dependency, lot, confirmation-context, cancellation, and refresh API helpers.
 - `supabase/migrations/020_production_planification.sql`: database schema, validation, RLS, derived statuses, and RPCs.
+- `supabase/migrations/026_planification_planned_time.sql`: adds `planned_time`, time-aware dependency validation, and updated plan RPC/view contracts.
 - `supabase/scripts/verify_production_planification.sql`: read-only post-migration verification.
-- `tests/planningEngine.test.ts`: focused recurrence and dependency-date tests.
+- `tests/planningEngine.test.ts`: focused recurrence and date+time dependency tests.
 
 ### Core Workflow
 
-- Planning is date-only. No time-of-day is stored or displayed.
-- Confirmation is always manual. The planner never creates a production batch automatically.
+- Planning stores `planned_date` plus `planned_time`. The time is used to keep same-day parent/child production order correct, for example a finished product at 08:00 must not consume a semi-finished product planned for 10:00 that same day.
+- Due active plans can be auto-confirmed when the app is open, authenticated, and connected. The runner checks immediately and then on a short interval, processes only ready/overdue planned occurrences whose planned date/time is due, requires every reserved lot selection to exist, and sends the confirmation through `create_production_with_traceability_v3`.
+- Manual confirmation remains supported and must not depend on Planification.
 - A finished or semi-finished product can be planned only when it has an active recipe.
 - Every mandatory raw-material dependency must have a concrete eligible lot for the planned date. `Eau` is the only no-lot exception.
-- Every required semi-finished dependency must resolve to a compatible production plan dated on or before the parent occurrence.
+- Every required semi-finished dependency must resolve to a compatible production plan dated/timed on or before the parent occurrence.
 - A child planned every two days can serve daily parent occurrences through the latest compatible child occurrence.
 - Plan creation is atomic: series, occurrences, and all dependency reservations are written by one security-definer RPC.
-- Confirming a ready/overdue plan opens the existing Production Confirm Lots screen with the planned date, substitutions, and lots preselected.
-- Production confirmation and plan completion are committed atomically by `create_production_with_traceability_v3`.
+- Confirming a ready/overdue plan opens the existing Production Confirm Lots screen with the planned date/time, substitutions, and lots preselected.
+- Production confirmation and plan completion are committed atomically by `create_production_with_traceability_v3`. The RPC row-locks the plan, accepts only `planned` ready/overdue plans, and updates the plan only when `production_batch_id is null`, so concurrent auto-confirm attempts cannot create repeated confirmations for the same plan.
 - Ad-hoc production confirmation remains supported and does not require a plan.
 
 ### Recurrence
@@ -884,12 +887,13 @@ Blockers propagate through nested semi-finished plans. Completed plans are immut
 
 ### UI
 
-The screen uses two operational widgets:
+The active screen uses three operational widgets:
 
-- Left: searchable/filterable occurrence list with status indicators.
-- Right: date-only visual timeline showing raw lots in blue, semi-finished productions in orange, and finished products in green.
+- Configuration widget: product, plan name, start date, planned time, frequency, responsible, notes, and save/back actions. There is no end-date field.
+- Details widget: product fabrication table similar to the Production Confirm Lots table. Lot/plan dropdowns show saved planification plans for semi-finished dependencies and eligible lots for raw materials.
+- Bottom full-width timeline widget: React Flow left-to-right timeline starting from the selected/today date. Day cards show the full weekday name and date. Product/source branches appear above each day. Week boundaries between Sunday and Monday use a subtle grey vertical separator. The timeline background is `#15171C` in dark mode and `#F3F6FA` in light mode.
 
-The creation dialog expands the full recipe tree, lets each semi-finished dependency use its own recurrence, blocks unresolved plans, and shows an editable review of the exact reserved raw lots and child productions before saving.
+The creation flow expands the full recipe tree, lets each semi-finished dependency use its own cadence, blocks unresolved plans, and shows an editable review of the exact reserved raw lots and child productions before saving.
 
 ### Security and Audit
 
@@ -900,8 +904,9 @@ The creation dialog expands the full recipe tree, lets each semi-finished depend
 
 ### Deployment
 
-Run the complete `supabase/migrations/020_production_planification.sql` migration once after migration 019, then run `supabase/scripts/verify_production_planification.sql`.
-The migration has not been executed merely by building the desktop app; it must be applied to the Supabase project separately.
+Run the complete `supabase/migrations/020_production_planification.sql` migration once after migration 019, then run `supabase/migrations/026_planification_planned_time.sql`, then run `supabase/scripts/verify_production_planification.sql`.
+The migrations are not executed merely by building the desktop app; they must be applied to the Supabase project separately.
+Important: as of the latest audit, the verification script still needs a planned-time update. Do not treat it as proof that same-day ordering is safe until it compares `planned_date` plus `planned_time`.
 
 ## Production PDF Fixes (This Session)
 
@@ -1028,6 +1033,10 @@ Scripts mentioned frequently:
 - `supabase/scripts/fix_creme_caramel_raw_material.sql`
 - `supabase/scripts/add_delete_product_catalog_item_function.sql`
 - `supabase/migrations/016_user_audit_tracking.sql`
+- `supabase/migrations/025_add_chocolat_aiguebelle_to_chocolate_substitution.sql`
+- `supabase/migrations/026_planification_planned_time.sql`
+- `supabase/migrations/027_production_consumption_supplier_name.sql`
+- `supabase/migrations/028_repair_production_detail_snapshot_sources.sql`
 
 When the user gets SQL errors like:
 
@@ -1094,7 +1103,7 @@ Before release builds:
 - The production schema view can render from a saved batch snapshot or current schema.
 - Search should be accent-insensitive but display names should keep accents.
 - The app may keep direct Supabase anon access on the client; security hardening relies on RLS/RPC policies in Supabase.
-- Planification screen is intentionally empty. The scheduler engine code exists but is hidden.
+- Planification screen is now active and Supabase-backed. The old localStorage scheduler notes are historical only.
 - `app-icon.png` in the project root is the source icon image. Do not delete it; it's needed for regenerating Tauri icons.
 
 ## Things to Avoid
@@ -1111,7 +1120,13 @@ Before release builds:
 - Do not make production confirmation navigate away after confirm.
 - Do not block confirmation only because the same product/date already exists.
 - Do not block confirmation because `Eau` has no lot.
-- Do not add UI or features to the Planification screen. Keep it empty until the user asks to activate it.
+- Do not reconnect the old localStorage scheduler prototype. Planification is now the Supabase-backed workflow.
+- Do not let Planification auto-confirm the same plan more than once or spam repeated confirmations. Auto-confirmation must stay guarded by the client runner and the `create_production_with_traceability_v3` database lock/check.
+- Do not remove `planned_time` from Planification; it protects same-day semi-fini/fini chronological order.
+- Do not run `supabase/scripts/rebuild_traceability_schema.sql` for planification repair unless it includes the migration 026 `planned_time` logic or migration 026 is reapplied immediately afterward.
+- Do not trust the current `supabase/scripts/verify_production_planification.sql` for same-day time conflicts until it compares planned date plus planned time.
+- Do not let Planification changes break the manual Production Confirm Lots workflow.
+- Do not key production substitution selections only by product id/name. Use the component row/node identity so repeated substitution groups can be changed independently.
 - Do not add "livraison(s)" or "confirmation(s)" text next to counts in the Lots & Traçabilité table.
 - Do not add a descriptive subtitle header to the Lots & Traçabilité screen.
 - Do not remove the `sortComponentsOrder` helper from the PDF generator. It ensures consistent semi-finished-first ordering.

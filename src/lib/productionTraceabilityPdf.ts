@@ -2,6 +2,8 @@ import { formatFrenchDate } from "./dateFormat";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AvailableLotOption,
+  DeliveryItem,
+  DeliveryRecord,
   Product,
   ProductionBatch,
   ProductionConsumptionDetail,
@@ -45,11 +47,18 @@ export type ProductionPdfData = {
   rows: ProductionPdfRow[];
 };
 
+export type DeliveryPdfData = {
+  delivery: DeliveryRecord;
+  items: DeliveryItem[];
+};
+
 type ProductionPdfRow = Record<PdfColumnKey, string>;
 
 type PdfRenderPage = {
   commands: string[];
+  height: number;
   pageNumber: number;
+  width: number;
 };
 
 type PdfMeasuredRow = {
@@ -83,6 +92,11 @@ function productionPdfSchemaRowKey(component: ProductSchemaNode, parentKey: stri
 const a4Landscape = {
   width: 841.89,
   height: 595.28,
+};
+
+const a4Portrait = {
+  width: 595.28,
+  height: 841.89,
 };
 
 const pageMargin = 28;
@@ -330,6 +344,10 @@ export async function renderProductionBatchPdfContents(items: ProductionPdfData[
   return renderProductionBatchPdf(items, await loadPdfLogoImage());
 }
 
+export async function renderDeliveryBatchPdfContents(items: DeliveryPdfData[]) {
+  return renderDeliveryBatchPdf(items, await loadPdfLogoImage());
+}
+
 export async function downloadProductionTraceabilityPdf(data: ProductionPdfData, renderedContents?: string) {
   const pdfContents = renderedContents ?? (await renderProductionPdfContents(data));
   const fileName = `${slugFileName(data.targetProductName)}-${slugFileName(data.targetProductLot)}.pdf`;
@@ -382,6 +400,32 @@ export async function downloadProductionTraceabilityBatchPdf(items: ProductionPd
   return { openedFallback: Boolean(openedWindow) };
 }
 
+export async function downloadDeliveryBatchPdf(items: DeliveryPdfData[], renderedContents?: string) {
+  const pdfContents = renderedContents ?? (await renderDeliveryBatchPdfContents(items));
+  const fileName = `livraisons-${new Date().toISOString().slice(0, 10)}.pdf`;
+
+  if (isTauriRuntime()) {
+    const filePath = await invoke<string>("save_pdf_to_downloads", {
+      fileName,
+      contents: pdfContents,
+      subFolder: "livraisons",
+    });
+    return { filePath };
+  }
+
+  const blob = new Blob([pdfContents], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  const openedWindow = window.open(url, "_blank", "noopener,noreferrer");
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  return { openedFallback: Boolean(openedWindow) };
+}
+
 export async function openProductionPdfFile(filePath: string) {
   if (isTauriRuntime()) {
     await invoke("open_pdf_file", { filePath });
@@ -408,7 +452,7 @@ function lotFromConsumptionRow(row: ProductionConsumptionDetail): AvailableLotOp
     productCategory: row.category,
     lotNumber: row.lotNumber,
     supplierLot: row.supplierLot,
-    supplierName: null,
+    supplierName: row.supplierName,
     sourceType: row.sourceType,
     sourceId: null,
     createdAt: row.lotCreatedAt,
@@ -595,6 +639,146 @@ function renderProductionBatchPdf(items: ProductionPdfData[], logoImage: PdfImag
   return buildPdfFile([page], logoImage ? [logoImage] : []);
 }
 
+export function renderDeliveryBatchPdf(items: DeliveryPdfData[], logoImage: PdfImageResource | null = null) {
+  const safeItems = items.length > 0 ? items : [];
+  const pages = safeItems.map((data, index) => {
+    const page = createPage(index + 1, a4Portrait);
+    drawDeliveryPage(page, data, logoImage);
+    return page;
+  });
+
+  if (pages.length === 0) {
+    const page = createPage(1, a4Portrait);
+    drawText(page, "Aucune livraison a exporter", page.width / 2, page.height / 2, 16, "bold", "center");
+    pages.push(page);
+  }
+
+  pages.forEach((page) => drawFooter(page, pages.length));
+  return buildPdfFile(pages, logoImage ? [logoImage] : []);
+}
+
+function drawDeliveryPage(page: PdfRenderPage, data: DeliveryPdfData, logoImage: PdfImageResource | null) {
+  const deliveryContentWidth = page.width - pageMargin * 2;
+  const deliveryTableMargin = 18;
+  const deliveryTableWidth = page.width - deliveryTableMargin * 2;
+  const top = page.height - pageMargin;
+  const headerHeight = 58;
+  const logoWidth = 108;
+  const metaWidth = 154;
+  const titleWidth = deliveryContentWidth - logoWidth - metaWidth;
+
+  drawRect(page, pageMargin, top - headerHeight, logoWidth, headerHeight);
+  if (logoImage) {
+    drawImageFit(page, logoImage, pageMargin + 9, top - headerHeight + 8, logoWidth - 18, headerHeight - 16);
+  } else {
+    drawText(page, "Casablanca", pageMargin + logoWidth / 2, top - 34, 11, "italic", "center");
+  }
+
+  drawRect(page, pageMargin + logoWidth, top - headerHeight, titleWidth, headerHeight);
+  drawText(page, "BON DE LIVRAISON", pageMargin + logoWidth + titleWidth / 2, top - 24, 17, "bold", "center");
+  drawText(page, "Produits finis confirmes", pageMargin + logoWidth + titleWidth / 2, top - 43, 9, "regular", "center");
+
+  const metaX = pageMargin + logoWidth + titleWidth;
+  drawRect(page, metaX, top - headerHeight, metaWidth, headerHeight);
+  drawText(page, "CASA FT-01", metaX + 9, top - 18, 10, "bold");
+  drawLine(page, metaX, top - 28, metaX + metaWidth, top - 28);
+  drawText(page, `Date : ${formatFrenchDate(new Date(data.delivery.deliveryDate))}`, metaX + 9, top - 46, 9, "regular");
+
+  const infoY = top - headerHeight - 18;
+  drawText(page, `Magasin : ${data.delivery.storeName}`, pageMargin, infoY, 8, "bold");
+  drawText(page, `Livraison : No ${data.delivery.deliveryNumber}`, pageMargin + 205, infoY, 8, "regular");
+  drawText(page, `Produits : ${data.items.length}`, pageMargin + 405, infoY, 8, "bold");
+
+  const tableTop = infoY - 18;
+  const tableBottom = pageMargin + 18;
+  drawDeliveryItemsTable(page, data.items, tableTop, tableBottom, deliveryTableWidth, deliveryTableMargin);
+}
+
+function drawDeliveryItemsTable(
+  page: PdfRenderPage,
+  sourceItems: DeliveryItem[],
+  tableTop: number,
+  tableBottom: number,
+  tableWidth: number,
+  tableX: number,
+) {
+  if (sourceItems.length === 0) {
+    drawRect(page, tableX, tableBottom, tableWidth, tableTop - tableBottom, { fill: "0.98 0.98 0.98" });
+    drawText(page, "Aucun produit confirme", page.width / 2, (tableTop + tableBottom) / 2, 12, "italic", "center");
+    return;
+  }
+
+  const categories = [
+    { key: "beldi", label: "BELDI", matches: (item: DeliveryItem) => item.productCategory === "beldi" },
+    { key: "boulangerie", label: "BOULANGERIE", matches: (item: DeliveryItem) => item.productCategory === "boulangerie" },
+    { key: "patisserie", label: "PATISSERIE", matches: (item: DeliveryItem) => item.productCategory === "patisserie" || item.productCategory === "cake" },
+    { key: "viennoiserie", label: "VIENNOISERIE", matches: (item: DeliveryItem) => item.productCategory === "viennoiserie" },
+  ];
+  const grouped = categories.map((category) => ({
+    ...category,
+    items: sourceItems
+      .filter(category.matches)
+      .sort((left, right) => left.productName.localeCompare(right.productName, "fr", { sensitivity: "base" })),
+  }));
+  const unmatched = sourceItems.filter((item) => !categories.some((category) => category.matches(item)));
+  grouped[2].items.push(...unmatched);
+
+  const availableHeight = tableTop - tableBottom;
+  const categoryHeaderHeight = 22;
+  const subHeaderHeight = 18;
+  const headerHeight = categoryHeaderHeight + subHeaderHeight;
+  const availableBodyHeight = availableHeight - headerHeight;
+  const categoryWidth = tableWidth / grouped.length;
+  const productWidth = categoryWidth * 0.6;
+  const lotWidth = categoryWidth - productWidth;
+  const productFontSize = 6.8;
+  const lotFontSize = 4.9;
+  const emptyFontSize = 6.2;
+
+  grouped.forEach((category, categoryIndex) => {
+    const x = tableX + categoryIndex * categoryWidth;
+    const itemCount = Math.max(1, category.items.length);
+    const rowHeight = Math.min(22, availableBodyHeight / itemCount);
+    drawRect(page, x, tableTop - categoryHeaderHeight, categoryWidth, categoryHeaderHeight, { fill: "0.87 0.91 0.90" });
+    drawText(page, category.label, x + categoryWidth / 2, tableTop - 15, 8, "bold", "center");
+
+    const subHeaderTop = tableTop - categoryHeaderHeight;
+    drawRect(page, x, subHeaderTop - subHeaderHeight, productWidth, subHeaderHeight, { fill: "0.92 0.93 0.94" });
+    drawText(page, "Produit", x + productWidth / 2, subHeaderTop - 12, 7, "bold", "center");
+    drawRect(page, x + productWidth, subHeaderTop - subHeaderHeight, lotWidth, subHeaderHeight, { fill: "0.92 0.93 0.94" });
+    drawText(page, "Lot", x + productWidth + lotWidth / 2, subHeaderTop - 12, 7, "bold", "center");
+
+    for (let rowIndex = 0; rowIndex < itemCount; rowIndex += 1) {
+      const item = category.items[rowIndex];
+      const rowTop = tableTop - headerHeight - rowIndex * rowHeight;
+      const fill = rowIndex % 2 === 0 ? "0.98 0.985 0.99" : "1 1 1";
+      drawRect(page, x, rowTop - rowHeight, productWidth, rowHeight, { fill });
+      drawRect(page, x + productWidth, rowTop - rowHeight, lotWidth, rowHeight, { fill });
+
+      if (item) {
+        drawText(
+          page,
+          fitText(item.productName, productWidth - 6, productFontSize, "regular"),
+          x + 3,
+          rowTop - rowHeight / 2 - productFontSize * 0.34,
+          productFontSize,
+          "regular",
+        );
+        drawText(
+          page,
+          fitText(item.lotNumber, lotWidth - 6, lotFontSize, "bold"),
+          x + productWidth + 3,
+          rowTop - rowHeight / 2 - lotFontSize * 0.34,
+          lotFontSize,
+          "bold",
+        );
+      } else {
+        drawText(page, "Aucun produit", x + categoryWidth / 2, rowTop - rowHeight / 2 - emptyFontSize * 0.34, emptyFontSize, "italic", "center");
+      }
+    }
+  });
+}
+
 function sortProductionPdfItemsByDate(items: ProductionPdfData[]) {
   return [...items].sort((left, right) => productionPdfDateValue(left.productionDate) - productionPdfDateValue(right.productionDate));
 }
@@ -605,10 +789,12 @@ function productionPdfDateValue(value: string) {
   return new Date(year, month - 1, day).getTime();
 }
 
-function createPage(pageNumber: number): PdfRenderPage {
+function createPage(pageNumber: number, pageSize = a4Landscape): PdfRenderPage {
   return {
     commands: [],
+    height: pageSize.height,
     pageNumber,
+    width: pageSize.width,
   };
 }
 
@@ -1004,7 +1190,7 @@ function cellsBelongToSameGroup(key: PdfColumnKey, current: ProductionPdfRow, ne
 }
 
 function drawFooter(page: PdfRenderPage, pageCount: number) {
-  drawText(page, `Page : ${page.pageNumber}/${pageCount}`, a4Landscape.width - pageMargin, pageMargin - 8, 8, "regular", "right");
+  drawText(page, `Page : ${page.pageNumber}/${pageCount}`, page.width - pageMargin, pageMargin - 8, 8, "regular", "right");
 }
 
 function fitRowsToSinglePage(rows: ProductionPdfRow[], columns: PdfColumn[], availableHeight: number) {
@@ -1246,8 +1432,164 @@ function sameSemiFinishedPrefix(first: string[], second: string[], length: numbe
   return true;
 }
 
-function textWidth(value: string, size: number) {
-  return value.length * size * 0.48;
+type PdfFontStyle = "regular" | "bold" | "italic";
+
+const helveticaRegularWidths: Record<string, number> = {
+  " ": 278,
+  "!": 278,
+  "\"": 355,
+  "#": 556,
+  "$": 556,
+  "%": 889,
+  "&": 667,
+  "'": 191,
+  "(": 333,
+  ")": 333,
+  "*": 389,
+  "+": 584,
+  ",": 278,
+  "-": 333,
+  ".": 278,
+  "/": 278,
+  ":": 278,
+  ";": 278,
+  "<": 584,
+  "=": 584,
+  ">": 584,
+  "?": 556,
+  "@": 1015,
+  "[": 278,
+  "\\": 278,
+  "]": 278,
+  "^": 469,
+  _: 556,
+  "`": 333,
+  "{": 334,
+  "|": 260,
+  "}": 334,
+  "~": 584,
+  A: 667,
+  B: 667,
+  C: 722,
+  D: 722,
+  E: 667,
+  F: 611,
+  G: 778,
+  H: 722,
+  I: 278,
+  J: 500,
+  K: 667,
+  L: 556,
+  M: 833,
+  N: 722,
+  O: 778,
+  P: 667,
+  Q: 778,
+  R: 722,
+  S: 667,
+  T: 611,
+  U: 722,
+  V: 667,
+  W: 944,
+  X: 667,
+  Y: 667,
+  Z: 611,
+  a: 556,
+  b: 556,
+  c: 500,
+  d: 556,
+  e: 556,
+  f: 278,
+  g: 556,
+  h: 556,
+  i: 222,
+  j: 222,
+  k: 500,
+  l: 222,
+  m: 833,
+  n: 556,
+  o: 556,
+  p: 556,
+  q: 556,
+  r: 333,
+  s: 500,
+  t: 278,
+  u: 556,
+  v: 500,
+  w: 722,
+  x: 500,
+  y: 500,
+  z: 500,
+};
+
+const helveticaBoldWidths: Record<string, number> = {
+  ...helveticaRegularWidths,
+  "!": 333,
+  "\"": 474,
+  "&": 722,
+  "'": 238,
+  ":": 333,
+  ";": 333,
+  "?": 611,
+  "@": 975,
+  "[": 333,
+  "]": 333,
+  "^": 584,
+  "{": 389,
+  "|": 280,
+  "}": 389,
+  A: 722,
+  B: 722,
+  D: 722,
+  I: 278,
+  J: 556,
+  K: 722,
+  L: 611,
+  P: 667,
+  R: 722,
+  a: 556,
+  b: 611,
+  c: 556,
+  d: 611,
+  f: 333,
+  g: 611,
+  h: 611,
+  i: 278,
+  j: 278,
+  k: 556,
+  l: 278,
+  m: 889,
+  n: 611,
+  o: 611,
+  p: 611,
+  q: 611,
+  r: 389,
+  s: 556,
+  t: 333,
+  u: 611,
+  v: 556,
+  w: 778,
+  x: 556,
+  y: 556,
+};
+
+function textWidth(value: string, size: number, font: PdfFontStyle = "regular") {
+  const widths = font === "bold" ? helveticaBoldWidths : helveticaRegularWidths;
+  return [...value].reduce((width, character) => {
+    const glyphWidth = /[0-9]/.test(character) ? 556 : (widths[character] ?? 556);
+    return width + (glyphWidth * size) / 1000;
+  }, 0);
+}
+
+function fitText(value: string, maxWidth: number, size: number, font: PdfFontStyle) {
+  const text = sanitizeText(value || "");
+  if (textWidth(text, size, font) <= maxWidth) return text;
+
+  let fitted = text;
+  while (fitted.length > 1 && textWidth(`${fitted}...`, size, font) > maxWidth) {
+    fitted = fitted.slice(0, -1);
+  }
+  return `${fitted.trimEnd()}...`;
 }
 
 function drawText(
@@ -1256,11 +1598,11 @@ function drawText(
   x: number,
   y: number,
   size: number,
-  font: "regular" | "bold" | "italic",
+  font: PdfFontStyle,
   align: "left" | "center" | "right" = "left",
 ) {
   const text = sanitizeText(value);
-  const textX = align === "center" ? x - textWidth(text, size) / 2 : align === "right" ? x - textWidth(text, size) : x;
+  const textX = align === "center" ? x - textWidth(text, size, font) / 2 : align === "right" ? x - textWidth(text, size, font) : x;
   const fontName = font === "bold" ? "F2" : font === "italic" ? "F3" : "F1";
   page.commands.push(`BT /${fontName} ${size} Tf ${number(textX)} ${number(y)} Td (${escapePdfText(text)}) Tj ET`);
 }
@@ -1340,7 +1682,7 @@ function buildPdfFile(pages: PdfRenderPage[], images: PdfImageResource[]) {
     const content = `0.6 w\n${page.commands.join("\n")}`;
     const contentId = addObject(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
     const pageId = addObject(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${a4Landscape.width} ${a4Landscape.height}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >>${xObjectResources} >> /Contents ${contentId} 0 R >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${page.width} ${page.height}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >>${xObjectResources} >> /Contents ${contentId} 0 R >>`,
     );
     pageIds.push(pageId);
   }

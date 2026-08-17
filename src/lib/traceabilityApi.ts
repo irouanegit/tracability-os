@@ -199,6 +199,7 @@ export type FabricationInput = {
 
 export type ProductionBatch = {
   id: string;
+  planId: string | null;
   productionDate: string;
   productId: string;
   productCode: string;
@@ -221,6 +222,53 @@ export type ProductionBatch = {
   createdAt: string;
 };
 
+export type ProductionBatchSourceFilter = "all" | "manual" | "planned";
+export type ProductionBatchCounts = Record<ProductionBatchSourceFilter, number>;
+
+export type DeliveryStore = "AL QODS" | "MIMOUZA" | "CHEFCHAOUNI" | "MOHAMMEDIA" | "ORCHIDÉE";
+export type DeliveryNumber = 1 | 2 | 3 | 4;
+
+export type DeliveryConfirmation = {
+  id: string;
+  deliveryDate: string;
+  storeName: DeliveryStore;
+  deliveryNumber: DeliveryNumber;
+  productId: string;
+  productionBatchId: string;
+  lotNumber: string;
+  confirmedAt: string;
+  createdAt: string;
+};
+
+export type DeliveryRecord = {
+  id: string;
+  deliveryCode: string;
+  deliveryDate: string;
+  storeName: DeliveryStore;
+  deliveryNumber: DeliveryNumber;
+  status: "confirmed" | "cancelled";
+  confirmedProductCount: number;
+  confirmedAt: string;
+  createdAt: string;
+};
+
+export type DeliveryItem = {
+  id: string;
+  deliveryId: string;
+  productId: string;
+  productionBatchId: string;
+  productCode: string;
+  productName: string;
+  productCategory: ProductCategory | null;
+  lotNumber: string;
+  confirmedAt: string;
+};
+
+export type DeliveryDraftItem = {
+  productId: string;
+  productionBatchId: string;
+};
+
 export type ProductionConsumptionDetail = {
   id: string;
   batchId: string;
@@ -241,6 +289,7 @@ export type ProductionConsumptionDetail = {
   productType: ProductType;
   category: ProductCategory | null;
   supplierLot: string | null;
+  supplierName: string | null;
   sourceType: "reception" | "fabrication";
   lotCreatedAt: string;
   linkedAt: string;
@@ -259,6 +308,7 @@ export type ProductionTraceabilityLot = {
   lotId: string;
   lotNumber: string;
   supplierLot: string | null;
+  supplierName?: string | null;
   sourceType: "reception" | "fabrication";
   lotCreatedAt: string;
   productId?: string;
@@ -366,6 +416,7 @@ export type ProductionPlan = {
   productType: Exclude<ProductType, "raw">;
   productCategory: ProductCategory | null;
   plannedDate: string;
+  plannedTime: string;
   recipeId: string;
   recipeVersion: number;
   schemaSnapshot: Record<string, unknown>;
@@ -410,6 +461,7 @@ export type ProductionPlanDependency = {
   sourcePlanProductId: string | null;
   sourcePlanProductName: string | null;
   sourcePlanDate: string | null;
+  sourcePlanTime: string | null;
   sourcePlanStatus: "planned" | "completed" | "cancelled" | null;
 };
 
@@ -447,6 +499,7 @@ export type ProductionPlanSeriesInput = {
   daysOfWeek: number[];
   startDate: string;
   endDate: string;
+  plannedTime: string;
 };
 
 export type ProductionPlanOccurrenceInput = {
@@ -454,6 +507,7 @@ export type ProductionPlanOccurrenceInput = {
   seriesId: string;
   productId: string;
   plannedDate: string;
+  plannedTime: string;
   recipeId: string;
   recipeVersion: number;
   schemaSnapshot: Record<string, unknown>;
@@ -478,6 +532,7 @@ export type ProductionPlanConfirmationContext = {
   planId: string;
   productId: string;
   plannedDate: string;
+  plannedTime: string;
   responsibleName: string | null;
   status: ProductionPlanDerivedStatus;
   selections: Array<{
@@ -1202,6 +1257,8 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
   if (!supabase) return [];
 
   const historyColumns =
+    "id, plan_id, production_date, product_id, product_code, product_name, product_type, product_category, generated_lot, responsible_name, operation, status, observations, consumed_lot_count, created_at";
+  const fallbackHistoryColumns =
     "id, production_date, product_id, product_code, product_name, product_type, product_category, generated_lot, responsible_name, operation, status, observations, consumed_lot_count, created_at";
   const auditColumns =
     "confirmed_by, confirmed_at, confirmed_by_name, confirmed_by_email, updated_by, updated_at, updated_by_name, updated_by_email";
@@ -1217,13 +1274,14 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
     (error.code === "42703" ||
       error.code === "PGRST204" ||
       error.message.includes("traceability_snapshot") ||
+      error.message.includes("plan_id") ||
       error.message.includes("confirmed_by") ||
       error.message.includes("exported_by") ||
       error.message.includes("exported_at"))
   ) {
     const fallback = await supabase
       .from("production_batch_history")
-      .select(historyColumns)
+      .select(fallbackHistoryColumns)
       .order("created_at", { ascending: false });
     historyRows = (fallback.data ?? []) as Array<Record<string, any>>;
     error = fallback.error;
@@ -1236,6 +1294,7 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
 
   return historyRows.map((row) => ({
     id: row.id,
+    planId: "plan_id" in row ? row.plan_id : null,
     productionDate: row.production_date,
     productId: row.product_id,
     productCode: row.product_code,
@@ -1259,19 +1318,243 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
   }));
 }
 
-export async function fetchProductionBatchCount(): Promise<number> {
+export async function fetchConfirmedProductionDatesForProduct(productId: string): Promise<string[]> {
+  if (!supabase || !productId) return [];
+
+  const { data, error } = await supabase
+    .from("production_batches")
+    .select("production_date")
+    .eq("product_id", productId)
+    .eq("status", "validated")
+    .order("production_date", { ascending: false });
+
+  if (error) {
+    if (
+      error.code === "PGRST205" ||
+      error.code === "PGRST204" ||
+      error.message.includes("production_batches") ||
+      error.message.includes("status")
+    ) {
+      return [];
+    }
+    throw error;
+  }
+
+  return [...new Set((data ?? []).map((row) => row.production_date).filter(Boolean))];
+}
+
+export async function fetchDeliveryConfirmations(
+  deliveryDate: string,
+  storeName: DeliveryStore,
+  deliveryNumber: DeliveryNumber,
+): Promise<DeliveryConfirmation[]> {
+  if (!supabase || !deliveryDate) return [];
+
+  const { data, error } = await supabase
+    .from("delivery_confirmations")
+    .select(
+      "id, delivery_date, store_name, delivery_number, product_id, production_batch_id, lot_number, confirmed_at, created_at",
+    )
+    .eq("delivery_date", deliveryDate)
+    .eq("store_name", storeName)
+    .eq("delivery_number", deliveryNumber)
+    .order("confirmed_at", { ascending: false });
+
+  if (error) {
+    if (error.code === "PGRST205" || error.message.includes("delivery_confirmations")) {
+      throw new Error("La migration 034_delivery_confirmations.sql doit etre executee pour utiliser les livraisons.");
+    }
+    throw error;
+  }
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    deliveryDate: row.delivery_date,
+    storeName: row.store_name as DeliveryStore,
+    deliveryNumber: row.delivery_number as DeliveryNumber,
+    productId: row.product_id,
+    productionBatchId: row.production_batch_id,
+    lotNumber: row.lot_number,
+    confirmedAt: row.confirmed_at,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function confirmProductDelivery(input: {
+  deliveryDate: string;
+  storeName: DeliveryStore;
+  deliveryNumber: DeliveryNumber;
+  productId: string;
+  productionBatchId: string;
+}) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+
+  const { data, error } = await supabase.rpc("confirm_product_delivery", {
+    p_delivery_date: input.deliveryDate,
+    p_store_name: input.storeName,
+    p_delivery_number: input.deliveryNumber,
+    p_product_id: input.productId,
+    p_production_batch_id: input.productionBatchId,
+  });
+
+  if (error) {
+    if (error.code === "PGRST202" || error.message.includes("confirm_product_delivery")) {
+      throw new Error("La migration 034_delivery_confirmations.sql doit etre executee pour confirmer une livraison.");
+    }
+    throw error;
+  }
+
+  return data as string;
+}
+
+export async function fetchDeliveries(): Promise<DeliveryRecord[]> {
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from("deliveries")
+    .select(
+      "id, delivery_code, delivery_date, store_name, delivery_number, status, confirmed_product_count, confirmed_at, created_at",
+    )
+    .order("delivery_date", { ascending: false })
+    .order("confirmed_at", { ascending: false });
+
+  if (error) {
+    if (error.code === "PGRST205" || error.message.includes("deliveries")) {
+      throw new Error("La migration 035_delivery_records.sql doit etre executee pour charger l'historique des livraisons.");
+    }
+    throw error;
+  }
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    deliveryCode: row.delivery_code,
+    deliveryDate: row.delivery_date,
+    storeName: row.store_name as DeliveryStore,
+    deliveryNumber: row.delivery_number as DeliveryNumber,
+    status: row.status as "confirmed" | "cancelled",
+    confirmedProductCount: Number(row.confirmed_product_count ?? 0),
+    confirmedAt: row.confirmed_at,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function fetchDeliveryItems(deliveryId: string): Promise<DeliveryItem[]> {
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from("delivery_items")
+    .select(
+      "id, delivery_id, product_id, production_batch_id, product_code, product_name, product_category, lot_number, confirmed_at",
+    )
+    .eq("delivery_id", deliveryId)
+    .order("product_category", { ascending: true })
+    .order("product_name", { ascending: true });
+
+  if (error) {
+    if (error.code === "PGRST205" || error.message.includes("delivery_items")) {
+      throw new Error("La migration 035_delivery_records.sql doit etre executee pour exporter une livraison.");
+    }
+    throw error;
+  }
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    deliveryId: row.delivery_id,
+    productId: row.product_id,
+    productionBatchId: row.production_batch_id,
+    productCode: row.product_code,
+    productName: row.product_name,
+    productCategory: row.product_category as ProductCategory | null,
+    lotNumber: row.lot_number,
+    confirmedAt: row.confirmed_at,
+  }));
+}
+
+export async function confirmDelivery(input: {
+  deliveryDate: string;
+  storeName: DeliveryStore;
+  deliveryNumber: DeliveryNumber;
+  items: DeliveryDraftItem[];
+}) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+
+  const { data, error } = await supabase.rpc("confirm_delivery", {
+    p_delivery_date: input.deliveryDate,
+    p_store_name: input.storeName,
+    p_delivery_number: input.deliveryNumber,
+    p_items: input.items.map((item) => ({
+      productId: item.productId,
+      productionBatchId: item.productionBatchId,
+    })),
+  });
+
+  if (error) {
+    if (error.code === "PGRST202" || error.message.includes("confirm_delivery")) {
+      throw new Error("La migration 035_delivery_records.sql doit etre executee pour confirmer une livraison.");
+    }
+    throw error;
+  }
+
+  return data as string;
+}
+
+export async function deleteDeliveries(deliveryIds: string[]) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+
+  const uniqueDeliveryIds = [...new Set(deliveryIds)].filter(Boolean);
+  if (uniqueDeliveryIds.length === 0) return;
+
+  const { error } = await supabase.rpc("delete_deliveries", {
+    p_delivery_ids: uniqueDeliveryIds,
+  });
+
+  if (error) {
+    if (error.code === "PGRST202" || error.message.includes("delete_deliveries")) {
+      throw new Error("La migration 036_delete_deliveries.sql doit etre executee pour supprimer les livraisons.");
+    }
+    throw error;
+  }
+}
+
+export async function fetchProductionBatchCount(sourceFilter: ProductionBatchSourceFilter = "all"): Promise<number> {
   if (!supabase) return 0;
 
-  const { count, error } = await supabase
+  let query = supabase
     .from("production_batch_history")
     .select("id", { count: "exact", head: true });
 
+  if (sourceFilter === "manual") {
+    query = query.is("plan_id", null);
+  } else if (sourceFilter === "planned") {
+    query = query.not("plan_id", "is", null);
+  }
+
+  const { count, error } = await query;
+
   if (error) {
-    if (error.code === "PGRST205" || error.message.includes("production_batch_history")) return 0;
+    if (
+      error.code === "PGRST205" ||
+      error.code === "PGRST204" ||
+      error.code === "42703" ||
+      error.message.includes("production_batch_history") ||
+      error.message.includes("plan_id")
+    ) {
+      return 0;
+    }
     throw error;
   }
 
   return count ?? 0;
+}
+
+export async function fetchProductionBatchCounts(): Promise<ProductionBatchCounts> {
+  const [all, manual, planned] = await Promise.all([
+    fetchProductionBatchCount("all"),
+    fetchProductionBatchCount("manual"),
+    fetchProductionBatchCount("planned"),
+  ]);
+
+  return { all, manual, planned };
 }
 
 export async function markReceptionBatchesPdfExported(batchIds: string[]) {
@@ -1302,7 +1585,7 @@ export async function fetchProductionConsumptionDetails(batchId: string): Promis
   const { data, error } = await supabase
     .from("production_consumption_details")
     .select(
-      "id, production_batch_id, component_node_key, parent_component_node_key, component_depth, selected_component_product_id, expected_component_product_id, expected_component_product_code, expected_component_product_name, expected_component_product_type, expected_component_product_category, lot_id, lot_number, consumed_product_id, consumed_product_code, consumed_product_name, consumed_product_type, consumed_product_category, supplier_lot, source_type, lot_created_at, linked_at",
+      "id, production_batch_id, component_node_key, parent_component_node_key, component_depth, selected_component_product_id, expected_component_product_id, expected_component_product_code, expected_component_product_name, expected_component_product_type, expected_component_product_category, lot_id, lot_number, consumed_product_id, consumed_product_code, consumed_product_name, consumed_product_type, consumed_product_category, supplier_lot, supplier_name, source_type, lot_created_at, linked_at",
     )
     .eq("production_batch_id", batchId)
     .order("linked_at", { ascending: true });
@@ -1316,7 +1599,7 @@ export async function fetchProductionConsumptionDetails(batchId: string): Promis
       const fallback = await supabase
         .from("production_consumption_details")
         .select(
-          "id, production_batch_id, lot_id, lot_number, consumed_product_id, consumed_product_code, consumed_product_name, consumed_product_type, consumed_product_category, supplier_lot, source_type, lot_created_at, linked_at",
+          "id, production_batch_id, lot_id, lot_number, consumed_product_id, consumed_product_code, consumed_product_name, consumed_product_type, consumed_product_category, supplier_lot, supplier_name, source_type, lot_created_at, linked_at",
         )
         .eq("production_batch_id", batchId)
         .order("linked_at", { ascending: true });
@@ -1358,6 +1641,7 @@ function mapProductionConsumptionDetailRow(row: any): ProductionConsumptionDetai
     productType: row.consumed_product_type,
     category: row.consumed_product_category,
     supplierLot: row.supplier_lot,
+    supplierName: "supplier_name" in row ? row.supplier_name ?? null : null,
     sourceType: row.source_type,
     lotCreatedAt: row.lot_created_at,
     linkedAt: row.linked_at,
@@ -1429,7 +1713,44 @@ export async function fetchProductionTraceabilitySnapshot(batchId: string): Prom
     .maybeSingle();
   if (error) throw error;
 
-  return parseProductionTraceabilitySnapshot(data?.traceability_snapshot);
+  return hydrateProductionTraceabilitySnapshotSuppliers(parseProductionTraceabilitySnapshot(data?.traceability_snapshot));
+}
+
+async function hydrateProductionTraceabilitySnapshotSuppliers(snapshot: ProductionTraceabilitySnapshot | null) {
+  if (!supabase || !snapshot) return snapshot;
+
+  const missingSupplierLotIds = [
+    ...new Set(
+      snapshot.components
+        .flatMap((component) => component.lots)
+        .filter((lot) => lot.sourceType === "reception" && lot.lotId && !lot.supplierName)
+        .map((lot) => lot.lotId),
+    ),
+  ];
+
+  if (missingSupplierLotIds.length === 0) return snapshot;
+
+  const { data, error } = await supabase
+    .from("lots")
+    .select("id, supplier:suppliers(name)")
+    .in("id", missingSupplierLotIds);
+
+  if (error) {
+    console.warn("Production traceability snapshot supplier hydration failed", error);
+    return snapshot;
+  }
+
+  const supplierByLotId = new Map((data ?? []).map((row) => [row.id, extractJoinedSupplierName(row.supplier)]));
+  return {
+    ...snapshot,
+    components: snapshot.components.map((component) => ({
+      ...component,
+      lots: component.lots.map((lot) => ({
+        ...lot,
+        supplierName: lot.supplierName ?? supplierByLotId.get(lot.lotId) ?? null,
+      })),
+    })),
+  };
 }
 
 export type ProductLotHistoryItem = {
@@ -1443,6 +1764,20 @@ export type ProductLotHistoryItem = {
   createdAt: string;
   actor: AuditActor;
 };
+
+function mapProductLotHistoryRow(row: Record<string, any>, includeActor: boolean): ProductLotHistoryItem {
+  return {
+    id: row.id,
+    productId: row.product_id,
+    lotNumber: row.lot_number,
+    supplierLot: row.supplier_lot,
+    supplierName: extractJoinedSupplierName(row.supplier),
+    sourceType: row.source_type,
+    sourceId: row.source_id,
+    createdAt: row.created_at,
+    actor: includeActor ? mapAuditActor(row, "created_by", "created_by_name", "created_by_email") : emptyAuditActor,
+  };
+}
 
 export async function fetchLotHistoryForProduct(productId: string, limit = 50): Promise<ProductLotHistoryItem[]> {
   if (!supabase || !productId) return [];
@@ -1463,30 +1798,51 @@ export async function fetchLotHistoryForProduct(productId: string, limit = 50): 
       .limit(limit);
 
     if (fallback.error) return [];
-    return (fallback.data ?? []).map((row) => ({
-      id: row.id,
-      productId: row.product_id,
-      lotNumber: row.lot_number,
-      supplierLot: row.supplier_lot,
-      supplierName: extractJoinedSupplierName(row.supplier),
-      sourceType: row.source_type,
-      sourceId: row.source_id,
-      createdAt: row.created_at,
-      actor: { id: null, name: null, email: null },
-    }));
+    return (fallback.data ?? []).map((row) => mapProductLotHistoryRow(row, false));
   }
 
-  return (data ?? []).map((row) => ({
-    id: row.id,
-    productId: row.product_id,
-    lotNumber: row.lot_number,
-    supplierLot: row.supplier_lot,
-    supplierName: extractJoinedSupplierName(row.supplier),
-    sourceType: row.source_type,
-    sourceId: row.source_id,
-    createdAt: row.created_at,
-    actor: mapAuditActor(row, "created_by", "created_by_name", "created_by_email"),
-  }));
+  return (data ?? []).map((row) => mapProductLotHistoryRow(row, true));
+}
+
+export async function fetchLotHistoryForProducts(productIds: string[], perProductLimit = 50): Promise<Record<string, ProductLotHistoryItem[]>> {
+  const uniqueProductIds = [...new Set(productIds.filter(Boolean))];
+  const lotsByProductId = Object.fromEntries(uniqueProductIds.map((productId) => [productId, []])) as Record<
+    string,
+    ProductLotHistoryItem[]
+  >;
+  if (!supabase || uniqueProductIds.length === 0) return lotsByProductId;
+
+  const chunkSize = 80;
+  const selectWithActor =
+    "id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, created_by, created_by_name, created_by_email, supplier:suppliers(name)";
+  const fallbackSelect = "id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, supplier:suppliers(name)";
+  let includeActor = true;
+
+  for (let index = 0; index < uniqueProductIds.length; index += chunkSize) {
+    const chunk = uniqueProductIds.slice(index, index + chunkSize);
+    let query = await (supabase.from("lots") as any)
+      .select(includeActor ? selectWithActor : fallbackSelect)
+      .in("product_id", chunk)
+      .order("created_at", { ascending: false });
+
+    if (query.error && includeActor) {
+      includeActor = false;
+      query = await (supabase.from("lots") as any)
+        .select(fallbackSelect)
+        .in("product_id", chunk)
+        .order("created_at", { ascending: false });
+    }
+
+    if (query.error) throw query.error;
+
+    for (const row of query.data ?? []) {
+      const productId = row.product_id;
+      if (!lotsByProductId[productId] || lotsByProductId[productId].length >= perProductLimit) continue;
+      lotsByProductId[productId].push(mapProductLotHistoryRow(row, includeActor));
+    }
+  }
+
+  return lotsByProductId;
 }
 
 export async function createProductionWithTraceability(input: ProductionTraceabilityInput) {
@@ -1550,6 +1906,7 @@ export async function fetchProductionPlans(): Promise<ProductionPlan[]> {
       .from("production_plan_overview")
       .select("*")
       .order("planned_date")
+      .order("planned_time")
       .order("product_name"),
     supabase.from("production_plan_series").select("id, status"),
   ]);
@@ -1572,6 +1929,7 @@ export async function fetchProductionPlans(): Promise<ProductionPlan[]> {
     productType: row.product_type,
     productCategory: row.product_category,
     plannedDate: row.planned_date,
+    plannedTime: row.planned_time ?? "06:30:00",
     recipeId: row.recipe_id,
     recipeVersion: Number(row.recipe_version),
     schemaSnapshot: isRecord(row.schema_snapshot) ? row.schema_snapshot : {},
@@ -1629,6 +1987,7 @@ export async function fetchProductionPlanDependencies(planId: string): Promise<P
     sourcePlanProductId: row.source_plan_product_id,
     sourcePlanProductName: row.source_plan_product_name,
     sourcePlanDate: row.source_plan_date,
+    sourcePlanTime: row.source_plan_time,
     sourcePlanStatus: row.source_plan_status,
   }));
 }
@@ -1761,6 +2120,7 @@ export async function fetchProductionPlanConfirmationContext(planId: string): Pr
     planId: String(data.planId),
     productId: String(data.productId),
     plannedDate: String(data.plannedDate),
+    plannedTime: typeof data.plannedTime === "string" ? data.plannedTime : "06:30:00",
     responsibleName: typeof data.responsibleName === "string" ? data.responsibleName : null,
     status: data.status as ProductionPlanDerivedStatus,
     selections: Array.isArray(data.selections)

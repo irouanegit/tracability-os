@@ -33,7 +33,7 @@ export function buildProductionSchemaBranchFromTraceabilitySnapshot(snapshot: Pr
       productCategory: lot.productCategory ?? null,
       lotNumber: lot.lotNumber,
       supplierLot: lot.supplierLot,
-      supplierName: null,
+      supplierName: lot.supplierName ?? null,
       sourceType: lot.sourceType,
       sourceId: null,
       createdAt: lot.lotCreatedAt,
@@ -47,13 +47,15 @@ export function buildProductionSchemaBranchFromTraceabilitySnapshot(snapshot: Pr
     const selectedProductId = lots[0]?.productId ?? node.productId;
     const selectedProductName = lots[0]?.productName ?? node.productName;
 
-    lotDrafts[node.productId] = {
+    const draft: InheritedProductionLotDraft = {
       lots,
       selectedProductId,
       selectedProductName,
       selectedLotIds: lots.map((lot) => lot.id),
       status: "ready",
     };
+    lotDrafts[node.nodeId] = draft;
+    if (!lotDrafts[node.productId]) lotDrafts[node.productId] = draft;
 
     return {
       id: node.productId,

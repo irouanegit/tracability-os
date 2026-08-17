@@ -49,16 +49,20 @@ export function ProductionTraceabilityDiagram({
   batch,
   rows,
   schema,
+  snapshot: savedSnapshot,
   status,
 }: {
   batch: ProductionBatch;
   rows: ProductionConsumptionDetail[];
   schema: ProductSchemaDiagram | null;
+  snapshot?: ProductionTraceabilitySnapshot | null;
   status: "idle" | "loading" | "error";
 }) {
-  const snapshot = useMemo(
-    () => batch.traceabilitySnapshot ?? (schema ? createCurrentSchemaSnapshot(batch, rows, schema) : null),
-    [batch, rows, schema],
+  const snapshot = useMemo(() => {
+    const baseSnapshot = savedSnapshot ?? batch.traceabilitySnapshot ?? (schema ? createCurrentSchemaSnapshot(batch, rows, schema) : null);
+    return baseSnapshot ? hydrateTraceabilitySnapshotLots(baseSnapshot, rows) : null;
+  },
+    [batch, rows, savedSnapshot, schema],
   );
   const graph = useMemo(() => (snapshot ? buildTraceabilityGraph(snapshot) : { nodes: [], edges: [] }), [snapshot]);
   const [nodes, setNodes, onNodesChange] = useNodesState<TraceabilityFlowNode>(graph.nodes);
@@ -158,26 +162,86 @@ function groupLotsByProductId(rows: ProductionConsumptionDetail[]) {
   const lotsByProductId = new Map<string, ProductionTraceabilityLot[]>();
 
   rows.forEach((row) => {
-    const productLots = lotsByProductId.get(row.expectedProductId) ?? [];
-    if (!productLots.some((lot) => lot.lotId === row.lotId)) {
-      productLots.push({
-        lotId: row.lotId,
-        lotNumber: row.lotNumber,
-        supplierLot: row.supplierLot,
-        sourceType: row.sourceType,
-        lotCreatedAt: row.lotCreatedAt,
-        productId: row.productId,
-        productName: row.productName,
-        productType: row.productType,
-        productCategory: row.category,
-        expectedProductId: row.expectedProductId,
-        expectedProductName: row.expectedProductName,
-      });
-    }
-    lotsByProductId.set(row.expectedProductId, productLots);
+    const keys = [
+      row.componentNodeKey,
+      row.expectedProductId,
+      row.selectedComponentProductId,
+      row.productId,
+      normalizeTraceabilityKey(row.expectedProductName),
+      normalizeTraceabilityKey(row.productName),
+    ].filter(Boolean) as string[];
+    const lot = productionRowToTraceabilityLot(row);
+    keys.forEach((key) => {
+      const productLots = lotsByProductId.get(key) ?? [];
+      if (!productLots.some((existingLot) => existingLot.lotId === lot.lotId)) productLots.push(lot);
+      lotsByProductId.set(key, productLots);
+    });
   });
 
   return lotsByProductId;
+}
+
+function productionRowToTraceabilityLot(row: ProductionConsumptionDetail): ProductionTraceabilityLot {
+  return {
+    lotId: row.lotId,
+    lotNumber: row.lotNumber,
+    supplierLot: row.supplierLot,
+    supplierName: row.supplierName,
+    sourceType: row.sourceType,
+    lotCreatedAt: row.lotCreatedAt,
+    productId: row.productId,
+    productName: row.productName,
+    productType: row.productType,
+    productCategory: row.category,
+    expectedProductId: row.expectedProductId,
+    expectedProductName: row.expectedProductName,
+  };
+}
+
+function hydrateTraceabilitySnapshotLots(snapshot: ProductionTraceabilitySnapshot, rows: ProductionConsumptionDetail[]) {
+  if (rows.length === 0) return snapshot;
+
+  const lotsByKey = groupLotsByProductId(rows);
+  let changed = false;
+  const components = snapshot.components.map((component) => {
+    const lots =
+      lotsByKey.get(component.nodeId) ??
+      lotsByKey.get(component.productId) ??
+      lotsByKey.get(normalizeTraceabilityKey(component.productName)) ??
+      [];
+    if (lots.length === 0) return component;
+    changed = true;
+    return { ...component, lots };
+  });
+
+  return changed ? { ...snapshot, components } : snapshot;
+}
+
+function getComponentLots(
+  component: ProductSchemaNode,
+  lotsByProductId: Map<string, ProductionTraceabilityLot[]>,
+) {
+  return lotsByProductId.get(component.id) ?? lotsByProductId.get(component.code) ?? lotsByProductId.get(normalizeTraceabilityKey(component.name)) ?? [];
+}
+
+function getComponentProductId(
+  component: ProductSchemaNode,
+  lotsByProductId: Map<string, ProductionTraceabilityLot[]>,
+) {
+  if (lotsByProductId.has(component.id)) return component.id;
+  if (lotsByProductId.has(component.code)) return component.code;
+  const nameLot = lotsByProductId.get(normalizeTraceabilityKey(component.name))?.[0];
+  if (nameLot?.expectedProductId) return nameLot.expectedProductId;
+  if (nameLot?.productId) return nameLot.productId;
+  return component.id;
+}
+
+function normalizeTraceabilityKey(value: string | null | undefined) {
+  return (value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
 
 function flattenSchemaComponents(
@@ -188,14 +252,15 @@ function flattenSchemaComponents(
 ): ProductionTraceabilityNode[] {
   return components.flatMap((component) => {
     const nodeId = `${parentNodeId}__${component.id}`;
+    const productId = getComponentProductId(component, lotsByProductId);
     const node: ProductionTraceabilityNode = {
       nodeId,
       parentNodeId,
-      productId: component.id,
+      productId,
       productName: component.name,
       productType: component.type,
       depth,
-      lots: lotsByProductId.get(component.id) ?? [],
+      lots: getComponentLots(component, lotsByProductId),
     };
 
     return [node, ...flattenSchemaComponents(component.children, nodeId, lotsByProductId, depth + 1)];

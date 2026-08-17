@@ -898,7 +898,13 @@ begin
       completed_by = v_actor_id,
       updated_by = v_actor_id,
       updated_at = now()
-  where id = p_plan_id;
+  where id = p_plan_id
+    and status = 'planned'
+    and production_batch_id is null;
+
+  if not found then
+    raise exception 'Production plan was already confirmed by another request.';
+  end if;
 
   perform log_traceability_event(
     'production_plan.completed',

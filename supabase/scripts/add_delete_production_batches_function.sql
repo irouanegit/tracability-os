@@ -6,6 +6,7 @@ set search_path = public
 as $$
 declare
   v_batch_ids uuid[] := coalesce(p_batch_ids, array[]::uuid[]);
+  v_actor_id uuid := auth.uid();
   v_deleted_count integer := 0;
   v_blocking_count integer := 0;
 begin
@@ -24,6 +25,22 @@ begin
 
   if v_blocking_count > 0 then
     raise exception 'Impossible de supprimer une production dont le lot est deja utilise dans une autre production.';
+  end if;
+
+  if to_regclass('public.production_plans') is not null then
+    execute $sql$
+      update production_plans
+      set status = 'cancelled',
+          production_batch_id = null,
+          cancelled_reason = coalesce(cancelled_reason, 'Production supprimee depuis l''historique'),
+          cancelled_at = coalesce(cancelled_at, now()),
+          cancelled_by = coalesce(cancelled_by, $2),
+          completed_at = null,
+          completed_by = null,
+          updated_by = coalesce($2, updated_by),
+          updated_at = now()
+      where production_batch_id = any($1)
+    $sql$ using v_batch_ids, v_actor_id;
   end if;
 
   delete from production_batches batch

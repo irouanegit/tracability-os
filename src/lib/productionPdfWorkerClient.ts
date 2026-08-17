@@ -1,6 +1,8 @@
 import {
+  renderDeliveryBatchPdfContents,
   renderProductionBatchPdfContents,
   renderProductionPdfContents,
+  type DeliveryPdfData,
   type ProductionPdfData,
 } from "./productionTraceabilityPdf";
 
@@ -12,11 +14,14 @@ type ProductionPdfWorkerResponse = {
 
 function renderWithWorker(mode: "single", data: ProductionPdfData): Promise<string>;
 function renderWithWorker(mode: "batch", data: ProductionPdfData[]): Promise<string>;
-function renderWithWorker(mode: "single" | "batch", data: ProductionPdfData | ProductionPdfData[]) {
+function renderWithWorker(mode: "delivery", data: DeliveryPdfData[]): Promise<string>;
+function renderWithWorker(mode: "single" | "batch" | "delivery", data: ProductionPdfData | ProductionPdfData[] | DeliveryPdfData[]) {
   if (typeof Worker === "undefined") {
     return mode === "single"
       ? renderProductionPdfContents(data as ProductionPdfData)
-      : renderProductionBatchPdfContents(data as ProductionPdfData[]);
+      : mode === "batch"
+        ? renderProductionBatchPdfContents(data as ProductionPdfData[])
+        : renderDeliveryBatchPdfContents(data as DeliveryPdfData[]);
   }
 
   return new Promise<string>((resolve, reject) => {
@@ -43,7 +48,9 @@ function renderWithWorker(mode: "single" | "batch", data: ProductionPdfData | Pr
     console.warn("PDF worker unavailable; falling back to main thread rendering", error);
     return mode === "single"
       ? renderProductionPdfContents(data as ProductionPdfData)
-      : renderProductionBatchPdfContents(data as ProductionPdfData[]);
+      : mode === "batch"
+        ? renderProductionBatchPdfContents(data as ProductionPdfData[])
+        : renderDeliveryBatchPdfContents(data as DeliveryPdfData[]);
   });
 }
 
@@ -53,4 +60,8 @@ export function renderSingleProductionPdfInWorker(data: ProductionPdfData) {
 
 export function renderProductionBatchPdfInWorker(data: ProductionPdfData[]) {
   return renderWithWorker("batch", data);
+}
+
+export function renderDeliveryBatchPdfInWorker(data: DeliveryPdfData[]) {
+  return renderWithWorker("delivery", data);
 }

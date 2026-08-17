@@ -1,57 +1,98 @@
 # GitHub Releases updater
 
-This project is prepared for Tauri's updater plugin with GitHub Releases as the update host.
+This project uses Tauri's updater plugin with GitHub Releases as the main update host.
 
-## Current GitHub setup
+## Current endpoint
 
-- Repository: `https://github.com/Irouane4/tracability-os`
-- Local `origin`: `https://github.com/Irouane4/tracability-os.git`
-- Updater endpoint configured in `src-tauri/tauri.conf.json`:
-
-```json
-"https://github.com/Irouane4/tracability-os/releases/latest/download/latest.json"
-```
-
-This GitHub Actions secret is already configured:
+New builds read update metadata from:
 
 ```text
-TAURI_SIGNING_PRIVATE_KEY
+https://github.com/irouanegit/tracability-os/releases/latest/download/latest.json
 ```
 
-Its value must be the full content of:
+The `latest.json` asset points to the signed Windows installer attached to the same GitHub release.
+
+## Repository
+
+Target release-hosting repository:
+
+```text
+https://github.com/irouanegit/tracability-os
+```
+
+The repository must be public because Tauri updater downloads release assets without GitHub authentication.
+
+This repository does not need to contain the app source code. It can be a small public release host with only a README and release assets.
+
+## Required local secret
+
+Tauri updater signatures use the local private key:
 
 ```text
 C:\Users\user\.tauri\tracability-os.key
 ```
 
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` can stay empty because the generated local key has no password.
+Do not commit this key. If it is lost, installed apps will not trust future updates signed with a different key.
 
-Important: do not commit `C:\Users\user\.tauri\tracability-os.key`. Keep a backup in a safe place. If this private key is lost, installed apps will not trust future updates signed by a different key.
+## One-time GitHub setup
 
-## Publishing a new update
-
-1. Bump the app version in the project version files.
-2. Commit and push the changes.
-3. Create and push a tag matching the workflow trigger:
+After authenticating the GitHub CLI as `irouanegit`, create the public release-hosting repository:
 
 ```powershell
-git tag app-v0.1.21
-git push origin app-v0.1.21
+gh auth status
+gh repo create irouanegit/tracability-os --public --add-readme --description "Tracability OS updater releases"
 ```
 
-The workflow at `.github/workflows/release.yml` builds the Windows NSIS installer, signs the updater artifact, uploads release assets, and publishes `latest.json`.
+Do not push the local source code unless you intentionally want the whole project source to be public.
 
-## Local signed build
+## Publish flow
 
-For a local release build with updater artifacts:
+Build signed updater artifacts:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY_PATH="C:\Users\user\.tauri\tracability-os.key"
-npm.cmd run tauri build
+npm.cmd run release:build:signed
 ```
 
-The Windows updater signature is generated next to the installer under:
+Check what will be published:
+
+```powershell
+npm.cmd run release:github:dry-run
+```
+
+Publish the installer, signature, and `latest.json` to GitHub Releases:
+
+```powershell
+npm.cmd run release:github
+```
+
+The script creates or updates:
 
 ```text
-src-tauri\target\release\bundle\nsis
+Release tag: app-v<version>
+Assets:
+  Tracability OS_<version>_x64-setup.exe
+  Tracability OS_<version>_x64-setup.exe.sig
+  latest.json
+```
+
+## Bridge for old installed apps
+
+Old installed builds still check the previous Supabase endpoint. To migrate them without serving the heavy installer from Supabase, publish the GitHub release first, then update only Supabase `latest.json`:
+
+```powershell
+$env:SUPABASE_SERVICE_ROLE_KEY="paste-service-role-key-here"
+npm.cmd run release:supabase:bridge
+```
+
+That bridge uploads only a small JSON file to Supabase. The installer URL inside it points to GitHub Releases.
+
+After users install one bridged update, future versions check GitHub directly.
+
+## Version rule
+
+The updater only appears when the published `latest.json` version is greater than the installed app version. For a real update test, bump both:
+
+```text
+package.json
+src-tauri/tauri.conf.json
 ```

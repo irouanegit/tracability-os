@@ -1,3 +1,7 @@
+-- Allow deletion of production history rows created by Planification.
+-- Auto-confirmed batches are referenced by production_plans.production_batch_id,
+-- so the linked plan occurrence must be detached before deleting the batch.
+
 create or replace function delete_production_batches(p_batch_ids uuid[])
 returns integer
 language plpgsql
@@ -27,21 +31,17 @@ begin
     raise exception 'Impossible de supprimer une production dont le lot est deja utilise dans une autre production.';
   end if;
 
-  if to_regclass('public.production_plans') is not null then
-    execute $sql$
-      update production_plans
-      set status = 'cancelled',
-          production_batch_id = null,
-          cancelled_reason = coalesce(cancelled_reason, 'Production supprimee depuis l''historique'),
-          cancelled_at = coalesce(cancelled_at, now()),
-          cancelled_by = coalesce(cancelled_by, $2),
-          completed_at = null,
-          completed_by = null,
-          updated_by = coalesce($2, updated_by),
-          updated_at = now()
-      where production_batch_id = any($1)
-    $sql$ using v_batch_ids, v_actor_id;
-  end if;
+  update production_plans
+  set status = 'cancelled',
+      production_batch_id = null,
+      cancelled_reason = coalesce(cancelled_reason, 'Production supprimee depuis l''historique'),
+      cancelled_at = coalesce(cancelled_at, now()),
+      cancelled_by = coalesce(cancelled_by, v_actor_id),
+      completed_at = null,
+      completed_by = null,
+      updated_by = coalesce(v_actor_id, updated_by),
+      updated_at = now()
+  where production_batch_id = any(v_batch_ids);
 
   delete from production_batches batch
   where batch.id = any(v_batch_ids);
@@ -56,4 +56,7 @@ begin
 end;
 $$;
 
-grant execute on function delete_production_batches(uuid[]) to anon, authenticated;
+revoke all on function delete_production_batches(uuid[]) from public;
+grant execute on function delete_production_batches(uuid[]) to authenticated;
+
+notify pgrst, 'reload schema';

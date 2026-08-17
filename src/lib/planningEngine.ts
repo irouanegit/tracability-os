@@ -12,17 +12,20 @@ export type PlanningOccurrence = {
   id: string;
   productId: string;
   plannedDate: string;
+  plannedTime?: string;
 };
 
 export type PlanningDependencyCandidate = {
   occurrenceId: string;
   productId: string;
   plannedDate: string;
+  plannedTime?: string;
 };
 
 export type PlanningSourceStatus = "blocked" | "waiting" | "ready" | "overdue" | "recipe_changed" | "completed" | "cancelled";
 
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+const timePattern = /^\d{2}:\d{2}(?::\d{2})?$/;
 const planningFrequencies = new Set<PlanningFrequency>(["once", "daily", "weekdays", "every_n_days", "specific_days"]);
 
 function parseDateOnly(value: string) {
@@ -104,10 +107,17 @@ export function findLatestDependencyOccurrence(
   candidates: PlanningDependencyCandidate[],
   productId: string,
   parentDate: string,
+  parentTime = "23:59:59",
 ) {
   return candidates
-    .filter((candidate) => candidate.productId === productId && candidate.plannedDate <= parentDate)
-    .sort((left, right) => right.plannedDate.localeCompare(left.plannedDate))[0] ?? null;
+    .filter(
+      (candidate) =>
+        candidate.productId === productId &&
+        comparePlanningMoment(candidate.plannedDate, candidate.plannedTime, parentDate, parentTime) <= 0,
+    )
+    .sort((left, right) =>
+      comparePlanningMoment(right.plannedDate, right.plannedTime, left.plannedDate, left.plannedTime),
+    )[0] ?? null;
 }
 
 export function groupOccurrencesByDate<T extends { plannedDate: string }>(occurrences: T[]) {
@@ -121,6 +131,27 @@ export function groupOccurrencesByDate<T extends { plannedDate: string }>(occurr
 
 export function isDateOnly(value: string) {
   return datePattern.test(value);
+}
+
+export function normalizePlanningTime(value: string | null | undefined) {
+  if (!value || !timePattern.test(value)) return "06:30:00";
+  const [hour, minute, second = "00"] = value.split(":");
+  return `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}`;
+}
+
+export function formatPlanningTimeForInput(value: string | null | undefined) {
+  return normalizePlanningTime(value).slice(0, 5);
+}
+
+export function comparePlanningMoment(
+  leftDate: string,
+  leftTime: string | null | undefined,
+  rightDate: string,
+  rightTime: string | null | undefined,
+) {
+  const dateComparison = leftDate.localeCompare(rightDate);
+  if (dateComparison !== 0) return dateComparison;
+  return normalizePlanningTime(leftTime).localeCompare(normalizePlanningTime(rightTime));
 }
 
 export function isPlanningSourceStatusUsable(status: PlanningSourceStatus | string) {

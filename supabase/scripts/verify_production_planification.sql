@@ -1,4 +1,5 @@
--- Read-only verification after 020_production_planification.sql.
+-- Read-only verification after 020_production_planification.sql and
+-- 026_planification_planned_time.sql.
 -- This script is intentionally defensive: if the migration is only partially applied,
 -- it reports missing objects instead of failing on the first absent table/view.
 
@@ -23,10 +24,22 @@ from (
     ('production_plan_series table', to_regclass('public.production_plan_series') is not null),
     ('production_plans table', to_regclass('public.production_plans') is not null),
     ('production_plan_dependencies table', to_regclass('public.production_plan_dependencies') is not null),
+    (
+      'production_batch_history.plan_id column',
+      exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'production_batch_history'
+          and column_name = 'plan_id'
+      )
+    ),
     ('planning_eligible_lots view', to_regclass('public.planning_eligible_lots') is not null),
     ('production_plan_overview view', to_regclass('public.production_plan_overview') is not null),
     ('production_plan_dependency_details view', to_regclass('public.production_plan_dependency_details') is not null),
     ('create_production_plan_bundle rpc', to_regprocedure('public.create_production_plan_bundle(jsonb,jsonb,jsonb)') is not null),
+    ('update_production_plan_series_status rpc', to_regprocedure('public.update_production_plan_series_status(uuid,text)') is not null),
+    ('archive_production_plan_series rpc', to_regprocedure('public.archive_production_plan_series(uuid,text)') is not null),
     ('get_production_plan_confirmation_context rpc', to_regprocedure('public.get_production_plan_confirmation_context(uuid)') is not null),
     ('create_production_with_traceability_v3 rpc', to_regprocedure('public.create_production_with_traceability_v3(uuid,timestamp with time zone,uuid,text,text,text,text,jsonb)') is not null),
     ('cancel_production_plan rpc', to_regprocedure('public.cancel_production_plan(uuid,text)') is not null),
@@ -71,6 +84,131 @@ begin
       'deep checks',
       'skipped',
       jsonb_build_object('reason', 'Run 020_production_planification.sql, then rerun this verifier.')
+    );
+    return;
+  end if;
+
+  execute $sql$
+    insert into planning_verification_report (section, status, details)
+    select
+      'planned-time readiness',
+      case when bool_and(is_present) then 'ok' else 'missing' end,
+      jsonb_object_agg(object_name, is_present order by object_name)
+    from (
+      values
+        (
+          'production_plan_series.planned_time column',
+          exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name = 'production_plan_series'
+              and column_name = 'planned_time'
+          )
+        ),
+        (
+          'production_plans.planned_time column',
+          exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name = 'production_plans'
+              and column_name = 'planned_time'
+          )
+        ),
+        (
+          'production_plan_overview.planned_time column',
+          exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name = 'production_plan_overview'
+              and column_name = 'planned_time'
+          )
+        ),
+        (
+          'production_plan_dependency_details.source_plan_time column',
+          exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name = 'production_plan_dependency_details'
+              and column_name = 'source_plan_time'
+          )
+        ),
+        (
+          'production_plans_product_moment_idx index',
+          exists (
+            select 1
+            from pg_indexes
+            where schemaname = 'public'
+              and tablename = 'production_plans'
+              and indexname = 'production_plans_product_moment_idx'
+          )
+        ),
+        (
+          'validate_production_plan_dependency time-aware function',
+          exists (
+            select 1
+            from pg_proc proc
+            join pg_namespace nsp on nsp.oid = proc.pronamespace
+            where nsp.nspname = 'public'
+              and proc.proname = 'validate_production_plan_dependency'
+              and pg_get_functiondef(proc.oid) like '%planned_time%'
+          )
+        ),
+        (
+          'create_production_plan_bundle plannedTime payload support',
+          exists (
+            select 1
+            from pg_proc proc
+            join pg_namespace nsp on nsp.oid = proc.pronamespace
+            where nsp.nspname = 'public'
+              and proc.proname = 'create_production_plan_bundle'
+              and pg_get_function_arguments(proc.oid) = 'p_series jsonb, p_plans jsonb, p_dependencies jsonb'
+              and pg_get_functiondef(proc.oid) like '%plannedTime%'
+          )
+        ),
+        (
+          'planned confirmation duplicate guard',
+          exists (
+            select 1
+            from pg_proc proc
+            join pg_namespace nsp on nsp.oid = proc.pronamespace
+            where nsp.nspname = 'public'
+              and proc.proname = 'create_production_with_traceability_v3'
+              and pg_get_function_arguments(proc.oid) = 'p_plan_id uuid, p_production_date timestamp with time zone, p_product_id uuid, p_generated_lot text, p_responsible_name text, p_operation text, p_observations text, p_consumed_lot_selections jsonb'
+              and pg_get_functiondef(proc.oid) like '%production_batch_id is null%'
+              and pg_get_functiondef(proc.oid) like '%Production plan was already confirmed by another request.%'
+          )
+        )
+    ) as checks(object_name, is_present)
+  $sql$;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'production_plan_series'
+      and column_name = 'planned_time'
+  ) or not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'production_plans'
+      and column_name = 'planned_time'
+  ) or not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'production_plan_overview'
+      and column_name = 'planned_time'
+  ) then
+    insert into planning_verification_report (section, status, details)
+    values (
+      'deep checks',
+      'skipped',
+      jsonb_build_object('reason', 'Run 020_production_planification.sql, then 026_planification_planned_time.sql, then rerun this verifier.')
     );
     return;
   end if;
@@ -173,11 +311,13 @@ begin
         dependency.id,
         parent_product.name as parent_product,
         parent.planned_date as parent_date,
+        parent.planned_time as parent_time,
         dependency.source_kind,
         selected_product.name as selected_component,
         lot.effective_date,
         lot.expiry_date,
         child.planned_date as child_date,
+        child.planned_time as child_time,
         child.status as child_status
       from production_plan_dependencies dependency
       join production_plans parent on parent.id = dependency.plan_id
@@ -200,7 +340,7 @@ begin
             and (
               child.id is null
               or child.status = 'cancelled'
-              or child.planned_date > parent.planned_date
+              or (child.planned_date + child.planned_time) > (parent.planned_date + parent.planned_time)
             )
           )
         )
@@ -362,6 +502,7 @@ begin
         overview.id,
         overview.product_name,
         overview.planned_date,
+        overview.planned_time,
         overview.derived_status,
         overview.blocker_count,
         overview.waiting_count
@@ -378,8 +519,9 @@ order by
   case section
     when 'object readiness' then 1
     when 'prerequisites' then 2
-    when 'series plan_name column' then 3
-    when 'rls' then 4
+    when 'planned-time readiness' then 3
+    when 'series plan_name column' then 4
+    when 'rls' then 5
     else 10
   end,
   section;

@@ -136,6 +136,35 @@ test("dependency resolution ignores other products and uses the latest compatibl
   assert.equal(candidate?.occurrenceId, "latest");
 });
 
+test("dependency resolution rejects a same-day child plan that happens later than its parent", () => {
+  const candidate = findLatestDependencyOccurrence(
+    [
+      { occurrenceId: "yesterday", productId: "pate-special", plannedDate: "2026-07-29", plannedTime: "15:00" },
+      { occurrenceId: "later-today", productId: "pate-special", plannedDate: "2026-07-30", plannedTime: "11:00" },
+    ],
+    "pate-special",
+    "2026-07-30",
+    "10:00",
+  );
+
+  assert.equal(candidate?.occurrenceId, "yesterday");
+});
+
+test("dependency resolution accepts the latest same-day child plan before the parent time", () => {
+  const candidate = findLatestDependencyOccurrence(
+    [
+      { occurrenceId: "morning", productId: "pate-special", plannedDate: "2026-07-30", plannedTime: "07:30" },
+      { occurrenceId: "afternoon", productId: "pate-special", plannedDate: "2026-07-30", plannedTime: "14:00" },
+      { occurrenceId: "future", productId: "pate-special", plannedDate: "2026-07-30", plannedTime: "18:00" },
+    ],
+    "pate-special",
+    "2026-07-30",
+    "15:00",
+  );
+
+  assert.equal(candidate?.occurrenceId, "afternoon");
+});
+
 test("planning ranges are capped at 90 calendar days", () => {
   assert.throws(
     () =>

@@ -1,0 +1,55 @@
+.sp-14, .sp-14 *, .sp-14 *::before, .sp-14 *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+.sp-14 {
+  --bg: #04080f;
+  --c: #76ff03;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg);
+}
+.sp-14__svg {
+  width: 120px;
+  height: 60px;
+  overflow: visible;
+  filter: drop-shadow(0 0 6px var(--c)) drop-shadow(0 0 12px rgba(118,255,3,0.3));
+}
+.sp-14__path {
+  fill: none;
+  stroke: var(--c);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 300;
+  stroke-dashoffset: 300;
+  animation: sp-14-draw 2s ease-in-out infinite;
+}
+.sp-14__track {
+  fill: none;
+  stroke: rgba(118,255,3,0.1);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+@keyframes sp-14-draw {
+  0% {
+    stroke-dashoffset: 300;
+    opacity: 1;
+  }
+  50% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: -300;
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-14__path {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
