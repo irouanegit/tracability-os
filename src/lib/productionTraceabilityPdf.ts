@@ -706,9 +706,7 @@ function drawDeliverySignatureAreas(page: PdfRenderPage, x: number, width: numbe
   const rightX = x + signatureWidth + gap;
 
   drawRect(page, x, signatureY, signatureWidth, signatureHeight);
-  drawRect(page, rightX, signatureY, signatureWidth, signatureHeight);
-  drawText(page, "Visa RCQ", x + 9, signatureY + signatureHeight - 13, 8, "bold");
-  drawText(page, "Visa ARCQ", rightX + 9, signatureY + signatureHeight - 13, 8, "bold");
+  drawText(page, "Visa RCQ/ARCQ", x + 9, signatureY + signatureHeight - 13, 8, "bold");
 }
 
 function drawDeliveryItemsTable(

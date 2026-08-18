@@ -1263,11 +1263,7 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
   const auditColumns =
     "confirmed_by, confirmed_at, confirmed_by_name, confirmed_by_email, updated_by, updated_at, updated_by_name, updated_by_email";
   const exportColumns = "exported_by, exported_at, exported_by_name, exported_by_email";
-  let { data, error } = await supabase
-    .from("production_batch_history")
-    .select(`${historyColumns}, ${auditColumns}, ${exportColumns}`)
-    .order("created_at", { ascending: false });
-  let historyRows = (data ?? []) as Array<Record<string, any>>;
+  let { rows: historyRows, error } = await fetchAllProductionHistoryRows(`${historyColumns}, ${auditColumns}, ${exportColumns}`);
 
   if (
     error &&
@@ -1279,11 +1275,8 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
       error.message.includes("exported_by") ||
       error.message.includes("exported_at"))
   ) {
-    const fallback = await supabase
-      .from("production_batch_history")
-      .select(fallbackHistoryColumns)
-      .order("created_at", { ascending: false });
-    historyRows = (fallback.data ?? []) as Array<Record<string, any>>;
+    const fallback = await fetchAllProductionHistoryRows(fallbackHistoryColumns);
+    historyRows = fallback.rows;
     error = fallback.error;
   }
 
@@ -1316,6 +1309,28 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
     exportedAt: "exported_at" in row ? row.exported_at : null,
     createdAt: row.created_at,
   }));
+}
+
+async function fetchAllProductionHistoryRows(columns: string) {
+  if (!supabase) return { rows: [] as Array<Record<string, any>>, error: null };
+
+  const pageSize = 1000;
+  const rows: Array<Record<string, any>> = [];
+
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await supabase
+      .from("production_batch_history")
+      .select(columns)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + pageSize - 1);
+
+    if (error) return { rows, error };
+
+    const pageRows = (data ?? []) as Array<Record<string, any>>;
+    rows.push(...pageRows);
+
+    if (pageRows.length < pageSize) return { rows, error: null };
+  }
 }
 
 export async function fetchConfirmedProductionDatesForProduct(productId: string): Promise<string[]> {
