@@ -679,7 +679,7 @@ function drawDeliveryPage(page: PdfRenderPage, data: DeliveryPdfData, logoImage:
 
   const metaX = pageMargin + logoWidth + titleWidth;
   drawRect(page, metaX, top - headerHeight, metaWidth, headerHeight);
-  drawText(page, "CASA FT-01", metaX + 9, top - 18, 10, "bold");
+  drawText(page, "ENRG-FT-01", metaX + 9, top - 18, 10, "bold");
   drawLine(page, metaX, top - 28, metaX + metaWidth, top - 28);
   drawText(page, `Date d'application : ${deliveryApplicationDate}`, metaX + 9, top - 46, 8.2, "regular");
 
@@ -707,8 +707,8 @@ function drawDeliverySignatureAreas(page: PdfRenderPage, x: number, width: numbe
 
   drawRect(page, x, signatureY, signatureWidth, signatureHeight);
   drawRect(page, rightX, signatureY, signatureWidth, signatureHeight);
-  drawText(page, "Visa client", x + 9, signatureY + signatureHeight - 13, 8, "bold");
-  drawText(page, "Visa R. Q", rightX + 9, signatureY + signatureHeight - 13, 8, "bold");
+  drawText(page, "Visa RCQ", x + 9, signatureY + signatureHeight - 13, 8, "bold");
+  drawText(page, "Visa ARCQ", rightX + 9, signatureY + signatureHeight - 13, 8, "bold");
 }
 
 function drawDeliveryItemsTable(
