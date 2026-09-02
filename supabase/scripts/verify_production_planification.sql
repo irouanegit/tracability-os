@@ -1,5 +1,5 @@
 -- Read-only verification after 020_production_planification.sql and
--- 026_planification_planned_time.sql.
+-- 026_planification_planned_time.sql and 037_preserve_semi_finished_batch_lineage.sql.
 -- This script is intentionally defensive: if the migration is only partially applied,
 -- it reports missing objects instead of failing on the first absent table/view.
 
@@ -57,6 +57,7 @@ from (
     ('set_traceability_audit_columns trigger function', to_regprocedure('public.set_traceability_audit_columns()') is not null),
     ('log_traceability_event function', to_regprocedure('public.log_traceability_event(text,text,uuid,jsonb)') is not null),
     ('create_production_with_traceability_v2 rpc', to_regprocedure('public.create_production_with_traceability_v2(timestamp with time zone,uuid,text,text,text,text,jsonb)') is not null),
+    ('batch-lineage snapshot function', to_regprocedure('public.build_production_traceability_snapshot_with_batch_lineage(uuid)') is not null),
     (
       'production_consumptions expected_component_product_id column',
       exists (
@@ -395,31 +396,19 @@ begin
 
   execute $sql$
     insert into planning_verification_report (section, status, details)
-    with recursive dependency_walk as (
+    with dependency_walk as (
       select
         plan.id as root_plan_id,
-        dependency.*,
-        array[plan.id]::uuid[] as plan_path
+        dependency.*
       from production_plans plan
       join production_plan_dependencies dependency on dependency.plan_id = plan.id
       where plan.status = 'completed'
         and plan.production_batch_id is not null
-
-      union all
-
-      select
-        parent.root_plan_id,
-        child.*,
-        parent.plan_path || parent.source_plan_id
-      from dependency_walk parent
-      join production_plan_dependencies child on child.plan_id = parent.source_plan_id
-      where parent.source_kind = 'planned_production'
-        and parent.source_plan_id is not null
-        and not parent.source_plan_id = any(parent.plan_path)
     ),
     planned_selections as (
-      select distinct on (walk.root_plan_id, walk.expected_product_id)
+      select
         walk.root_plan_id,
+        walk.node_key,
         walk.expected_product_id,
         case
           when walk.source_kind in ('raw_lot', 'existing_production_lot') then walk.source_lot_id
@@ -433,11 +422,11 @@ begin
         and produced.source_id = child.production_batch_id
         and produced.product_id = walk.selected_product_id
       where walk.source_kind <> 'water'
-      order by walk.root_plan_id, walk.expected_product_id, walk.depth
     ),
     actual_selections as (
       select distinct
         plan.id as root_plan_id,
+        consumption.component_node_key as node_key,
         coalesce(consumption.expected_component_product_id, lot.product_id) as expected_product_id,
         consumption.consumed_lot_id
       from production_plans plan
@@ -448,18 +437,18 @@ begin
         and plan.production_batch_id is not null
     ),
     missing_expected as (
-      select root_plan_id, expected_product_id, consumed_lot_id
+      select root_plan_id, node_key, expected_product_id, consumed_lot_id
       from planned_selections
       where consumed_lot_id is not null
       except
-      select root_plan_id, expected_product_id, consumed_lot_id
+      select root_plan_id, node_key, expected_product_id, consumed_lot_id
       from actual_selections
     ),
     unexpected_actual as (
-      select root_plan_id, expected_product_id, consumed_lot_id
+      select root_plan_id, node_key, expected_product_id, consumed_lot_id
       from actual_selections
       except
-      select root_plan_id, expected_product_id, consumed_lot_id
+      select root_plan_id, node_key, expected_product_id, consumed_lot_id
       from planned_selections
       where consumed_lot_id is not null
     ),

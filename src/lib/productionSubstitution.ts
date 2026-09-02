@@ -15,6 +15,13 @@ export type InheritedProductionLotDraft = {
   status: "ready";
 };
 
+export function getInheritedProductionLotDraft<T>(
+  node: ProductSchemaNode,
+  lotDrafts: Record<string, T>,
+) {
+  return lotDrafts[node.traceabilityNodeId ?? node.id];
+}
+
 export function buildProductionSchemaBranchFromTraceabilitySnapshot(snapshot: ProductionTraceabilitySnapshot) {
   const childrenByParentNodeId = snapshot.components.reduce<Map<string, ProductionTraceabilityNode[]>>((groups, node) => {
     const parentNodeId = node.parentNodeId || "";
@@ -35,8 +42,9 @@ export function buildProductionSchemaBranchFromTraceabilitySnapshot(snapshot: Pr
       supplierLot: lot.supplierLot,
       supplierName: lot.supplierName ?? null,
       sourceType: lot.sourceType,
-      sourceId: null,
+      sourceId: lot.sourceId ?? null,
       createdAt: lot.lotCreatedAt,
+      availableAt: lot.lotCreatedAt,
       responsibleName: null,
     };
   }
@@ -75,6 +83,7 @@ export function buildProductionSchemaBranchFromTraceabilitySnapshot(snapshot: Pr
       schemaUpdatedAt: null,
       lastUpdated: lots[0]?.createdAt ?? "",
       stock: null,
+      traceabilityNodeId: node.nodeId,
       children,
     };
   }
@@ -105,6 +114,7 @@ export function mergeProductionSchemaBranches(
       name: snapshotNode.name || schemaNode.name,
       type: snapshotNode.type,
       category: snapshotNode.category ?? schemaNode.category,
+      traceabilityNodeId: snapshotNode.traceabilityNodeId,
       children: mergeProductionSchemaBranches(schemaNode.children, snapshotNode.children),
     };
   });

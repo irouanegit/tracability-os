@@ -1,4 +1,7 @@
 import {
+  memo,
+  useCallback,
+  useDeferredValue,
   useEffect,
   useId,
   useMemo,
@@ -33,6 +36,13 @@ import { FabricationDiagramWorkspace } from "./FabricationDiagramWorkspace";
 import { ProductionTraceabilityDiagram } from "./ProductionTraceabilityDiagram";
 import { TraceabilityLoader } from "./TraceabilityLoader";
 import appIconUrl from "../app-icon.png";
+import {
+  fastExtractDateKey,
+  fastFormatDateOnly,
+  fastFormatTime,
+  formatFrenchDate,
+  formatFrenchDateTime,
+} from "./lib/dateFormat";
 import { generateProductionLotNumber } from "./lib/productionLotCodification";
 import {
   buildProductionPdfData,
@@ -62,6 +72,7 @@ import {
   buildProductionSchemaBranchFromTraceabilitySnapshot,
   mergeProductionSchemaBranches,
 } from "./lib/productionSubstitution";
+import { selectProductionConsumptionBoundary } from "./lib/productionConsumptionBoundary";
 import { getAuthUserInitials, getAuthUserLabel, isSupabaseConfigured, supabase } from "./lib/supabase";
 import {
   archiveProductionPlanSeries,
@@ -80,6 +91,7 @@ import {
   createProductCatalogItem,
   createReception,
   fetchAvailableLotsForProduct,
+  fetchAvailableLotsForProducts,
   fetchActiveRecipeMetadata,
   fetchPlanningEligibleLots,
   fetchProductionPlanConfirmationContext,
@@ -103,6 +115,7 @@ import {
   type ProductLotHistoryItem,
   fetchLotStockPreview,
   fetchProductCatalog,
+  clearProductSchemaCache,
   fetchProductSchema,
   fetchProductSchemaDiagram,
   fetchRecentReceptions,
@@ -146,7 +159,7 @@ import {
 
 type ViewId = "dashboard" | "reception" | "fabrication" | "production" | "deliveries" | "traceability" | "planification" | "products" | "suppliers" | "reports";
 type CanvasPosition = { x: number; y: number };
-type ThemeMode = "dark" | "light" | "neumorphism" | "clay";
+type ThemeMode = "dark" | "light" | "neumorphism" | "clay" | "neobrutalism";
 type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "unconfigured";
 type UpdaterStatus = "idle" | "checking" | "available" | "upToDate" | "downloading" | "installing" | "ready" | "error";
 type UpdaterDetails = {
@@ -203,9 +216,10 @@ type IconName =
   | "moon"
   | "layers"
   | "shapes"
-  | "truck";
+  | "truck"
+  | "neobrutalism";
 
-const themeSequence: ThemeMode[] = ["light", "dark", "neumorphism", "clay"];
+const themeSequence: ThemeMode[] = ["light", "dark", "neumorphism", "clay", "neobrutalism"];
 
 function getNextTheme(theme: ThemeMode) {
   const currentIndex = themeSequence.indexOf(theme);
@@ -216,6 +230,7 @@ function getThemeLabel(theme: ThemeMode) {
   if (theme === "dark") return "Sombre";
   if (theme === "neumorphism") return "Neumorphisme";
   if (theme === "clay") return "Clay";
+  if (theme === "neobrutalism") return "Neo-Brutalisme";
   return "Clair";
 }
 
@@ -223,6 +238,7 @@ function getThemeIcon(theme: ThemeMode): IconName {
   if (theme === "dark") return "moon";
   if (theme === "neumorphism") return "layers";
   if (theme === "clay") return "shapes";
+  if (theme === "neobrutalism") return "neobrutalism";
   return "sun";
 }
 type ReceptionDraftLine = {
@@ -592,7 +608,7 @@ function App() {
   const [fabricationSchemaSidebarCollapsed, setFabricationSchemaSidebarCollapsed] = usePersistentState("fabricationSchemaSidebarCollapsed", false);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     const saved = localStorage.getItem("theme");
-    return (saved === "light" || saved === "neumorphism" || saved === "clay") ? saved : "dark";
+    return (saved === "light" || saved === "neumorphism" || saved === "clay" || saved === "neobrutalism") ? saved : "dark";
   });
   const [selectedFabricationProductId, setSelectedFabricationProductId] = usePersistentState("selectedFabricationProductId", "");
   const [products, setProducts] = useState<Product[]>([]);
@@ -780,6 +796,7 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (import.meta.env.DEV) return;
     if (authStatus !== "authenticated") return;
 
     let cancelled = false;
@@ -826,6 +843,11 @@ function App() {
 
   async function handleCheckForUpdates() {
     setUpdaterPanelOpen(true);
+    if (import.meta.env.DEV) {
+      setUpdaterStatus("upToDate");
+      setUpdaterMessage("Mode développement : les mises à jour sont désactivées.");
+      return;
+    }
     setUpdaterStatus("checking");
     setUpdaterMessage("Recherche des mises a jour...");
     setUpdaterProgress({ percent: 0, downloadedBytes: 0, totalBytes: 0 });
@@ -1239,6 +1261,24 @@ function UserProfileAvatarGroup({
   );
 }
 
+type DashboardActivityCounts = {
+  production: number;
+  autoProduction: number;
+  reception: number;
+  plan: number;
+};
+
+const zeroDashboardActivityCounts: DashboardActivityCounts = Object.freeze({
+  production: 0,
+  autoProduction: 0,
+  reception: 0,
+  plan: 0,
+});
+
+const frenchTimeFormatter = new Intl.DateTimeFormat("fr-FR", { hour: "2-digit", minute: "2-digit" });
+const frenchWeekdayFormatter = new Intl.DateTimeFormat("fr-FR", { weekday: "long" });
+const frenchMonthYearFormatter = new Intl.DateTimeFormat("fr-FR", { month: "long", year: "numeric" });
+
 function DashboardModule({
   active,
   productionBatches,
@@ -1294,18 +1334,38 @@ function DashboardModule({
     [plans, productionBatches, receptionBatches],
   );
   const activitiesByDate = useMemo(() => groupDashboardActivitiesByDate(dashboardActivities), [dashboardActivities]);
+  const activityCountsByDate = useMemo(() => {
+    const map = new Map<string, DashboardActivityCounts>();
+    for (const [date, activities] of activitiesByDate.entries()) {
+      map.set(date, countDashboardActivities(activities));
+    }
+    return map;
+  }, [activitiesByDate]);
+
   const calendarCells = useMemo(() => buildDashboardMonthCells(dashboardMonth), [dashboardMonth]);
   const selectedDayActivities = activitiesByDate.get(selectedDate) ?? [];
   const monthLabel = formatCalendarMonth(dashboardMonth);
   const monthStart = toInputDateValue(new Date(dashboardMonth.getFullYear(), dashboardMonth.getMonth(), 1));
   const monthEnd = toInputDateValue(new Date(dashboardMonth.getFullYear(), dashboardMonth.getMonth() + 1, 0));
-  const visibleMonthActivities = dashboardActivities.filter((activity) => activity.date >= monthStart && activity.date <= monthEnd);
-  const selectedDayCounts = countDashboardActivities(selectedDayActivities);
+  const visibleMonthActivities = useMemo(
+    () => dashboardActivities.filter((activity) => activity.date >= monthStart && activity.date <= monthEnd),
+    [dashboardActivities, monthStart, monthEnd],
+  );
+  const selectedDayCounts = activityCountsByDate.get(selectedDate) ?? zeroDashboardActivityCounts;
   const sidebarTabConfig = dashboardSidebarTabs.find((tab) => tab.id === sidebarTab) ?? dashboardSidebarTabs[0];
-  const activeSidebarActivities = selectedDayActivities.filter((activity) => dashboardActivityMatchesSidebarTab(activity, sidebarTab));
-  const filteredSidebarActivities = activeSidebarActivities
-    .filter((activity) => dashboardActivityMatchesSearch(activity, sidebarSearch))
-    .sort(compareDashboardCalendarActivitiesNewestFirst);
+  const activeSidebarActivities = useMemo(
+    () => selectedDayActivities.filter((activity) => dashboardActivityMatchesSidebarTab(activity, sidebarTab)),
+    [selectedDayActivities, sidebarTab],
+  );
+  const normalizedSidebarSearch = sidebarSearch.trim().toLocaleLowerCase("fr-FR");
+  const filteredSidebarActivities = useMemo(() => {
+    if (!normalizedSidebarSearch) {
+      return [...activeSidebarActivities].sort(compareDashboardCalendarActivitiesNewestFirst);
+    }
+    return activeSidebarActivities
+      .filter((activity) => dashboardActivityMatchesNormalizedSearch(activity, normalizedSidebarSearch))
+      .sort(compareDashboardCalendarActivitiesNewestFirst);
+  }, [activeSidebarActivities, normalizedSidebarSearch]);
   const sidebarEmptyLabel = sidebarSearch.trim()
     ? "Aucun résultat pour cette recherche."
     : sidebarTabConfig.emptyLabel;
@@ -1355,7 +1415,7 @@ function DashboardModule({
           </div>
           <div className="dashboard-month-grid">
             {calendarCells.map((cell, index) => {
-              const counts = countDashboardActivities(activitiesByDate.get(cell.date) ?? []);
+              const counts = activityCountsByDate.get(cell.date) ?? zeroDashboardActivityCounts;
               const total = counts.production + counts.autoProduction + counts.reception + counts.plan;
               const isSelected = cell.date === selectedDate;
               const isToday = cell.date === today;
@@ -1382,7 +1442,7 @@ function DashboardModule({
 
         <aside className="dashboard-day-sidebar">
           <div className="dashboard-day-sidebar-header">
-            <span>{capitalize(new Intl.DateTimeFormat("fr-FR", { weekday: "long" }).format(parseInputDate(selectedDate) ?? new Date()))}</span>
+            <span>{capitalize(frenchWeekdayFormatter.format(parseInputDate(selectedDate) ?? new Date()))}</span>
             <h2>{formatDate(selectedDate)}</h2>
             <p>{selectedDayActivities.length} activité(s)</p>
           </div>
@@ -1543,12 +1603,19 @@ function dashboardActivityMatchesSidebarTab(activity: DashboardCalendarActivity,
   return activity.kind === "plan";
 }
 
+function dashboardActivityMatchesNormalizedSearch(activity: DashboardCalendarActivity, needle: string) {
+  return (
+    activity.title.toLocaleLowerCase("fr-FR").includes(needle) ||
+    activity.detail.toLocaleLowerCase("fr-FR").includes(needle) ||
+    activity.meta.toLocaleLowerCase("fr-FR").includes(needle) ||
+    activity.timeLabel.includes(needle)
+  );
+}
+
 function dashboardActivityMatchesSearch(activity: DashboardCalendarActivity, query: string) {
   const needle = query.trim().toLocaleLowerCase("fr-FR");
   if (!needle) return true;
-  return [activity.title, activity.detail, activity.meta, activity.timeLabel]
-    .filter(Boolean)
-    .some((value) => value.toLocaleLowerCase("fr-FR").includes(needle));
+  return dashboardActivityMatchesNormalizedSearch(activity, needle);
 }
 
 function countDashboardActivities(activities: DashboardCalendarActivity[]) {
@@ -1582,9 +1649,11 @@ function buildDashboardMonthCells(monthDate: Date) {
 }
 
 function formatDashboardActivityTime(value: string) {
+  const fast = fastFormatTime(value);
+  if (fast !== "--:--") return fast;
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "--:--";
-  return new Intl.DateTimeFormat("fr-FR", { hour: "2-digit", minute: "2-digit" }).format(parsed);
+  return frenchTimeFormatter.format(parsed);
 }
 
 function DashboardActivitySection({
@@ -2959,6 +3028,104 @@ function ReceptionDetails({
 	  );
 	}
 
+type ProductionRecipeCardProps = {
+  product: Product;
+  isSelected: boolean;
+  isUsageOpen: boolean;
+  linkedProducts: Product[];
+  onSelect: (productId: string) => void;
+  onToggleUsage: (productId: string) => void;
+  onPrefetch?: (productId: string) => void;
+};
+
+const ProductionRecipeCard = memo(
+  function ProductionRecipeCard({
+    product,
+    isSelected,
+    isUsageOpen,
+    linkedProducts,
+    onSelect,
+    onToggleUsage,
+    onPrefetch,
+  }: ProductionRecipeCardProps) {
+    return (
+      <div
+        className={cx("production-recipe-card", isSelected && "selected")}
+        onClick={() => onSelect(product.id)}
+        onMouseEnter={() => onPrefetch?.(product.id)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onSelect(product.id);
+        }}
+        role="button"
+        tabIndex={0}
+      >
+        <div className="production-recipe-card-header">
+          <strong>{product.name}</strong>
+          <span className="production-recipe-card-actions">
+            {product.type === "semi_finished" ? (
+              <button
+                aria-expanded={isUsageOpen}
+                aria-label={`Voir les produits qui utilisent ${product.name}`}
+                className="production-recipe-usage-button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleUsage(product.id);
+                }}
+                type="button"
+              >
+                <AppIcon name="search" />
+              </button>
+            ) : null}
+            <span className="production-active-pill">Actif</span>
+          </span>
+        </div>
+        <div className="production-recipe-card-meta">
+          <ProductTypeBadge type={product.type} />
+          <span>{formatCategory(product.category)}</span>
+          <span>{product.componentCount} comp.</span>
+        </div>
+        {isUsageOpen ? (
+          <div className="production-recipe-usage-popover" onClick={(event) => event.stopPropagation()}>
+            {linkedProducts.length === 0 ? (
+              <p>Aucun produit actif n'utilise ce semi-fini.</p>
+            ) : (
+              linkedProducts.map((linkedProduct) => (
+                <button
+                  key={linkedProduct.id}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelect(linkedProduct.id);
+                  }}
+                  type="button"
+                >
+                  <strong>{linkedProduct.name}</strong>
+                  <span>
+                    {typeLabels[linkedProduct.type]} · {formatCategory(linkedProduct.category)}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        ) : null}
+      </div>
+    );
+  },
+  (prev, next) => {
+    return (
+      prev.product.id === next.product.id &&
+      prev.isSelected === next.isSelected &&
+      prev.isUsageOpen === next.isUsageOpen &&
+      prev.product.name === next.product.name &&
+      prev.product.type === next.product.type &&
+      prev.product.category === next.product.category &&
+      prev.product.componentCount === next.product.componentCount &&
+      prev.linkedProducts.length === next.linkedProducts.length
+    );
+  },
+);
+
 function ProductionModule({
   batches,
   plannedRequest,
@@ -2992,7 +3159,17 @@ function ProductionModule({
   const [historyPanelMode, setHistoryPanelMode] = usePersistentState<ProductionHistoryPanelMode>("production.historyPanelMode", "history");
   const [historyColumnFilters, setHistoryColumnFilters] = usePersistentState<ProductColumnFilter[]>("production.historyColumnFilters", []);
   const [historySourceFilter, setHistorySourceFilter] = usePersistentState<ProductionHistorySourceFilter>("production.historySourceFilter", "all");
-  const [recipeSearchTerm, setRecipeSearchTerm] = usePersistentState("production.recipeSearchTerm", "");
+  const [recipeSearchTerm, setRecipeSearchTerm] = useState(() => readPersistedState("production.recipeSearchTerm", ""));
+  const deferredSearchTerm = useDeferredValue(recipeSearchTerm);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(`${appUiStoragePrefix}production.recipeSearchTerm`, JSON.stringify(recipeSearchTerm));
+      } catch {}
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [recipeSearchTerm]);
   const [recipeTypeFilter, setRecipeTypeFilter] = usePersistentState<Exclude<ProductType, "raw"> | "all">("production.recipeTypeFilter", "all");
   const [recipeCategoryFilter, setRecipeCategoryFilter] = usePersistentState<ProductCategory | "all">("production.recipeCategoryFilter", "all");
   const [openRecipeUsageProductId, setOpenRecipeUsageProductId] = useState<string | null>(null);
@@ -3032,6 +3209,8 @@ function ProductionModule({
   const appliedPlannedRequestRef = useRef("");
   const responsibleNameProductRef = useRef(selectedProductId);
   const historyScrollRef = useRef<HTMLDivElement | null>(null);
+  const lastLoadedProductIdRef = useRef<string | null>(null);
+  const lastLoadedDateRef = useRef<string | null>(null);
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -3095,17 +3274,85 @@ function ProductionModule({
   const workspaceBatches = useMemo(() => workspaceBatchIds.flatMap((batchId) => batchById.get(batchId) ?? []), [batchById, workspaceBatchIds]);
   const exportableWorkspaceBatches = useMemo(() => workspaceBatches.filter((batch) => batch.status === "validated"), [workspaceBatches]);
   const selectedHistoryBatches = useMemo(() => selectedHistoryBatchIds.flatMap((batchId) => batchById.get(batchId) ?? []), [batchById, selectedHistoryBatchIds]);
+  const indexedBlueprints = useMemo(() => {
+    return products
+      .filter((product) => product.type !== "raw" && product.recipeStatus === "active")
+      .map((product) => {
+        const catLabel = categoryLabels[product.category ?? "boulangerie"] ?? "";
+        const typLabel = typeLabels[product.type] ?? "";
+        const searchStr = `${product.name} ${product.code ?? ""} ${catLabel} ${product.category ?? ""} ${typLabel} ${product.type}`;
+        return {
+          product,
+          normSearch: normalizeSearchText(searchStr),
+        };
+      });
+  }, [products]);
+
   const filteredBlueprints = useMemo(() => {
-    const query = recipeSearchTerm.trim().toLowerCase();
-    return activeBlueprints.filter((product) =>
-      (recipeTypeFilter === "all" || product.type === recipeTypeFilter) &&
-      (recipeCategoryFilter === "all" || product.category === recipeCategoryFilter) &&
-      (!query ||
-        [product.name, product.code, categoryLabels[product.category ?? "boulangerie"] ?? "", typeLabels[product.type]].some((value) =>
-          value.toLowerCase().includes(query),
-        )),
-    );
-  }, [activeBlueprints, recipeCategoryFilter, recipeSearchTerm, recipeTypeFilter]);
+    const normQuery = normalizeSearchText(deferredSearchTerm);
+    const hasQuery = Boolean(normQuery);
+
+    const result: Product[] = [];
+    for (let i = 0; i < indexedBlueprints.length; i++) {
+      const item = indexedBlueprints[i];
+      const p = item.product;
+      if (recipeTypeFilter !== "all" && p.type !== recipeTypeFilter) continue;
+      if (recipeCategoryFilter !== "all" && p.category !== recipeCategoryFilter) continue;
+      if (hasQuery && !item.normSearch.includes(normQuery)) continue;
+      result.push(p);
+    }
+    return result;
+  }, [indexedBlueprints, recipeCategoryFilter, deferredSearchTerm, recipeTypeFilter]);
+
+  const recipeListScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const recipeVirtualizer = useVirtualizer({
+    count: filteredBlueprints.length,
+    getScrollElement: () => recipeListScrollRef.current,
+    estimateSize: () => 98,
+    overscan: 6,
+    getItemKey: (index) => filteredBlueprints[index]?.id ?? index,
+  });
+
+  const prefetchingProductIdsRef = useRef(new Set<string>());
+
+  const handlePrefetchProduct = useCallback((productId: string) => {
+    if (prefetchingProductIdsRef.current.has(productId)) return;
+    prefetchingProductIdsRef.current.add(productId);
+
+    void (async () => {
+      try {
+        const schema = await fetchProductSchema(productId);
+        const childIds = schema.map((c) => c.id);
+        if (childIds.length > 0) {
+          void fetchAvailableLotsForProducts(childIds, 5, productionDate);
+        }
+      } catch {}
+    })();
+  }, [productionDate]);
+
+  const productionDraftCacheRef = useRef(
+    new Map<
+      string,
+      {
+        drafts: ProductionComponentDraft[];
+        lotDrafts: Record<string, ProductionLotDraft>;
+        expandedRows: Record<string, boolean>;
+      }
+    >(),
+  );
+
+  const handleSelectProduct = useCallback(
+    (productId: string) => {
+      selectProductionCatalogProduct(productId);
+      setOpenRecipeUsageProductId(null);
+    },
+    [selectProductionCatalogProduct],
+  );
+
+  const handleToggleUsage = useCallback((productId: string) => {
+    setOpenRecipeUsageProductId((current) => (current === productId ? null : productId));
+  }, []);
   const recipeUsageByProductId = useMemo(() => {
     const productsByComponentName = new Map<string, Product[]>();
     for (const product of activeBlueprints) {
@@ -3170,6 +3417,32 @@ function ProductionModule({
     return { ...component, children: resolvedChildren };
   }
 
+  async function hydrateSemiFinishedComponentBranch(
+    component: ProductSchemaNode,
+    rowKey: string,
+    lotId: string,
+    lots: AvailableLotOption[],
+  ): Promise<{ resolvedComponent: ProductSchemaNode; childLotDrafts: Record<string, ProductionLotDraft> } | null> {
+    const selectedLot = lots.find((lot) => lot.id === lotId);
+    if (!selectedLot || selectedLot.sourceType !== "fabrication" || !selectedLot.sourceId) return null;
+
+    try {
+      const snapshot = await fetchProductionTraceabilitySnapshot(selectedLot.sourceId);
+      if (!snapshot) return null;
+
+      const snapshotBranch = buildProductionSchemaBranchFromTraceabilitySnapshot(snapshot);
+      const resolvedComponent: ProductSchemaNode = {
+        ...component,
+        children: mergeProductionSchemaBranches(component.children, snapshotBranch.components),
+      };
+      const childLotDrafts = keyProductionLotDraftsBySchemaRows(resolvedComponent, rowKey, snapshotBranch.lotDrafts);
+      return { resolvedComponent, childLotDrafts };
+    } catch (error) {
+      console.error("Semi-finished lot traceability load failed", error);
+      return null;
+    }
+  }
+
   async function buildProductionLotDraft(
     component: ProductSchemaNode,
     rootProductId: string,
@@ -3181,7 +3454,7 @@ function ProductionModule({
     try {
       let lotsRequest = lotRequestCache.get(selectedSubstitutionProduct.id);
       if (!lotsRequest) {
-        lotsRequest = fetchAvailableLotsForProduct(selectedSubstitutionProduct.id, 5);
+        lotsRequest = fetchAvailableLotsForProduct(selectedSubstitutionProduct.id, 5, productionDate);
         lotRequestCache.set(selectedSubstitutionProduct.id, lotsRequest);
       }
       const lots = await lotsRequest;
@@ -3228,12 +3501,42 @@ function ProductionModule({
     return Object.fromEntries(entries) as Record<string, ProductionLotDraft>;
   }
 
+  function collectAllComponentProductIds(
+    nodes: ProductSchemaNode[],
+    rootProductId: string,
+    productSelectionOverrides: Record<string, string> = {},
+    rowKeyPrefix = "",
+  ): string[] {
+    const ids: string[] = [];
+    nodes.forEach((node, index) => {
+      const rowKey = productionSchemaRowKey(node, rowKeyPrefix, index);
+      const selected = resolveSelectedSubstitutionProduct(node, rootProductId, rowKey, productSelectionOverrides);
+      ids.push(selected.id);
+      if (node.children.length > 0) {
+        ids.push(...collectAllComponentProductIds(node.children, rootProductId, productSelectionOverrides, rowKey));
+      }
+    });
+    return ids;
+  }
+
   async function buildProductionLotDrafts(
     components: ProductSchemaNode[],
     rootProductId: string,
     productSelectionOverrides: Record<string, string> = {},
+    providedLotRequestCache?: Map<string, Promise<AvailableLotOption[]>>,
   ): Promise<Record<string, ProductionLotDraft>> {
-    const lotRequestCache = new Map<string, Promise<AvailableLotOption[]>>();
+    const lotRequestCache = providedLotRequestCache ?? new Map<string, Promise<AvailableLotOption[]>>();
+
+    if (lotRequestCache.size === 0) {
+      const allProductIds = collectAllComponentProductIds(components, rootProductId, productSelectionOverrides);
+      if (allProductIds.length > 0) {
+        const batchPromise = fetchAvailableLotsForProducts(allProductIds, 5, productionDate);
+        for (const productId of allProductIds) {
+          lotRequestCache.set(productId, batchPromise.then((res) => res[productId] ?? []));
+        }
+      }
+    }
+
     const entries = await Promise.all(
       orderProductionSchemaNodes(components).map((component, index) =>
         buildProductionLotDraftsForNode(
@@ -3326,52 +3629,118 @@ function ProductionModule({
       setLotDraftsByProductId({});
       setExpandedComponentRows({});
       setComponentStatus("idle");
+      lastLoadedProductIdRef.current = null;
+      lastLoadedDateRef.current = null;
       return;
     }
 
     const product = selectedProduct;
+    const isSameProduct = lastLoadedProductIdRef.current === product.id;
+    const isDateOnlyChange = isSameProduct && lastLoadedDateRef.current !== productionDate;
+
+    lastLoadedProductIdRef.current = product.id;
+    lastLoadedDateRef.current = productionDate;
+
+    const cacheKey = `${product.id}:${productionDate}`;
+    const cachedDraft = productionDraftCacheRef.current.get(cacheKey);
+
     let cancelled = false;
     async function loadComponents() {
-      setComponentStatus("loading");
-      setComponentDrafts([]);
-      setLotDraftsByProductId({});
-      setExpandedComponentRows({});
+      if (!isDateOnlyChange) {
+        if (cachedDraft) {
+          setComponentDrafts(cachedDraft.drafts);
+          setLotDraftsByProductId(cachedDraft.lotDrafts);
+          setExpandedComponentRows(cachedDraft.expandedRows);
+          setComponentStatus("ready");
+        } else {
+          setComponentStatus("loading");
+          setComponentDrafts([]);
+          setLotDraftsByProductId({});
+          setExpandedComponentRows({});
+        }
+      }
       setPdfStatus("idle");
       setPdfMessage("");
       setSaveStatus("idle");
       setMessage("");
       try {
-        const baseComponents = await fetchProductSchema(product.id);
-        const orderedBaseComponents = orderProductionSchemaNodes(baseComponents);
-        const components = await Promise.all(
-          orderedBaseComponents.map((component, index) =>
-            resolveProductionComponentTree(component, product.id, productionSchemaRowKey(component, "", index)),
-          ),
-        );
+        let components: ProductSchemaNode[];
+        if (isDateOnlyChange && componentDrafts.length > 0) {
+          components = componentDrafts.map((d) => d.component);
+        } else {
+          const baseComponents = await fetchProductSchema(product.id);
+          const orderedBaseComponents = orderProductionSchemaNodes(baseComponents);
+          components = await Promise.all(
+            orderedBaseComponents.map((component, index) =>
+              resolveProductionComponentTree(component, product.id, productionSchemaRowKey(component, "", index)),
+            ),
+          );
+        }
+
         const nextLotDrafts = await buildProductionLotDrafts(components, product.id);
 
+        let hydratedComponents = components;
+        let hydratedLotDrafts = { ...nextLotDrafts };
+
+        const hydrationPromises = hydratedComponents.map(async (comp, index) => {
+          const rowKey = productionSchemaRowKey(comp, "", index);
+          const draft = hydratedLotDrafts[rowKey];
+          const lotId = draft?.selectedLotIds[0];
+          if (comp.type === "semi_finished" && lotId && draft) {
+            const hydration = await hydrateSemiFinishedComponentBranch(comp, rowKey, lotId, draft.lots);
+            return { rowKey, hydration };
+          }
+          return null;
+        });
+
+        const hydrationResults = await Promise.all(hydrationPromises);
+        for (const result of hydrationResults) {
+          if (result?.hydration) {
+            hydratedComponents = replaceProductionSchemaNodeByRowKey(
+              hydratedComponents,
+              result.rowKey,
+              result.hydration.resolvedComponent,
+            );
+            hydratedLotDrafts = {
+              ...hydratedLotDrafts,
+              ...result.hydration.childLotDrafts,
+            };
+          }
+        }
+
         if (!cancelled) {
-          setComponentDrafts(
-            components.map((component, index) => {
-              const rowKey = productionSchemaRowKey(component, "", index);
-              return {
-                component,
-                lots: nextLotDrafts[rowKey]?.lots ?? [],
-                selectedProductId: nextLotDrafts[rowKey]?.selectedProductId ?? component.id,
-                selectedProductName: nextLotDrafts[rowKey]?.selectedProductName ?? component.name,
-                selectedLotIds: nextLotDrafts[rowKey]?.selectedLotIds ?? [],
-                confirmed: false,
-                status: nextLotDrafts[rowKey]?.status ?? "ready",
-              };
-            }),
-          );
-          setLotDraftsByProductId(nextLotDrafts);
-          setExpandedComponentRows(buildDefaultExpandedProductionRows(components));
+          const nextDrafts = hydratedComponents.map((component, index) => {
+            const rowKey = productionSchemaRowKey(component, "", index);
+            return {
+              component,
+              lots: hydratedLotDrafts[rowKey]?.lots ?? [],
+              selectedProductId: hydratedLotDrafts[rowKey]?.selectedProductId ?? component.id,
+              selectedProductName: hydratedLotDrafts[rowKey]?.selectedProductName ?? component.name,
+              selectedLotIds: hydratedLotDrafts[rowKey]?.selectedLotIds ?? [],
+              confirmed: false,
+              status: hydratedLotDrafts[rowKey]?.status ?? "ready",
+            };
+          });
+          const nextExpandedRows = !isDateOnlyChange
+            ? buildDefaultExpandedProductionRows(hydratedComponents)
+            : expandedComponentRows;
+
+          setComponentDrafts(nextDrafts);
+          setLotDraftsByProductId(hydratedLotDrafts);
+          if (!isDateOnlyChange) {
+            setExpandedComponentRows(nextExpandedRows);
+          }
           setComponentStatus("ready");
+
+          productionDraftCacheRef.current.set(cacheKey, {
+            drafts: nextDrafts,
+            lotDrafts: hydratedLotDrafts,
+            expandedRows: nextExpandedRows,
+          });
         }
       } catch (error) {
         console.error("Production blueprint load failed", error);
-        if (!cancelled) {
+        if (!cancelled && !isDateOnlyChange) {
           setComponentDrafts([]);
           setLotDraftsByProductId({});
           setExpandedComponentRows({});
@@ -3385,7 +3754,7 @@ function ProductionModule({
     return () => {
       cancelled = true;
     };
-  }, [screenMode, selectedProduct?.id]);
+  }, [productionDate, screenMode, selectedProduct?.id]);
 
   useEffect(() => {
     if (
@@ -3411,7 +3780,7 @@ function ProductionModule({
           const selection = selectionByExpectedProductId.get(component.id);
           if (!selection) return null;
           const selectedProductOption = products.find((product) => product.id === selection.selectedProductId);
-          const lots = await fetchAvailableLotsForProduct(selection.selectedProductId, 20);
+          const lots = await fetchAvailableLotsForProduct(selection.selectedProductId, 20, request.productionDate);
           if (!lots.some((lot) => lot.id === selection.lotId)) {
             throw new Error(`Le lot planifie pour ${selectedProductOption?.name ?? component.name} n'est plus disponible.`);
           }
@@ -3615,42 +3984,29 @@ function ProductionModule({
     setPdfStatus("idle");
     setPdfMessage("");
 
-    if (
-      component.type !== "semi_finished" ||
-      !currentDraft ||
-      currentDraft.selectedProductId === component.id
-    ) {
+    if (component.type !== "semi_finished" || !currentDraft) {
       return;
     }
 
-    const selectedLot = currentDraft.lots.find((lot) => lot.id === lotId);
-    if (!selectedLot || selectedLot.sourceType !== "fabrication" || !selectedLot.sourceId) return;
-
-    try {
-      const snapshot = await fetchProductionTraceabilitySnapshot(selectedLot.sourceId);
-      if (!snapshot) return;
-
-      const snapshotBranch = buildProductionSchemaBranchFromTraceabilitySnapshot(snapshot);
+    const hydration = await hydrateSemiFinishedComponentBranch(component, rowKey, lotId, currentDraft.lots);
+    if (hydration) {
       setLotDraftsByProductId((current) => {
         if (!current[rowKey]?.selectedLotIds.includes(lotId)) return current;
-        const replacement = {
-          ...component,
-          children: mergeProductionSchemaBranches(component.children, snapshotBranch.components),
-        };
-        return { ...current, ...keyProductionLotDraftsBySchemaRows(replacement, rowKey, snapshotBranch.lotDrafts) };
+        return { ...current, ...hydration.childLotDrafts };
       });
       setComponentDrafts((current) => {
-        const replacement = {
-          ...component,
-          children: mergeProductionSchemaBranches(component.children, snapshotBranch.components),
-        };
-        const nextComponents = replaceProductionSchemaNodeByRowKey(current.map((draft) => draft.component), rowKey, replacement);
-        const nextDrafts = current.map((draft, index) => ({ ...draft, component: nextComponents[index] ?? draft.component }));
+        const nextComponents = replaceProductionSchemaNodeByRowKey(
+          current.map((draft) => draft.component),
+          rowKey,
+          hydration.resolvedComponent,
+        );
+        const nextDrafts = current.map((draft, index) => ({
+          ...draft,
+          component: nextComponents[index] ?? draft.component,
+        }));
         setExpandedComponentRows(buildDefaultExpandedProductionRows(nextDrafts.map((draft) => draft.component)));
         return nextDrafts;
       });
-    } catch (error) {
-      console.error("Selected semi-finished lot traceability load failed", error);
     }
   }
 
@@ -3900,7 +4256,8 @@ function ProductionModule({
     }
 
     const effectiveComponents = flattenEffectiveProductionComponents(componentDrafts, lotDraftsByProductId);
-    const traceableComponents = effectiveComponents.filter((entry) => !isWaterComponent(entry.node));
+    const directComponents = selectProductionConsumptionBoundary(effectiveComponents);
+    const traceableComponents = directComponents.filter((entry) => !isWaterComponent(entry.node));
     const missingComponent = traceableComponents.find((entry) => entry.draft.selectedLotIds.length === 0);
     if (missingComponent) {
       const draft = missingComponent.draft;
@@ -4239,77 +4596,51 @@ function ProductionModule({
           <div className="production-search-row">
             <input autoComplete="off" placeholder="Rechercher recette, produit..." value={recipeSearchTerm} onChange={(event) => setRecipeSearchTerm(event.target.value)} />
           </div>
-          <div className="production-recipe-list">
+          <div className="production-recipe-list" ref={recipeListScrollRef}>
             {filteredBlueprints.length === 0 ? <EmptyState compact>Aucun schema actif.</EmptyState> : null}
-            {filteredBlueprints.map((product) => {
-              const linkedProducts = recipeUsageByProductId[product.id] ?? [];
-              const isUsageOpen = openRecipeUsageProductId === product.id;
+            {filteredBlueprints.length > 0 ? (
+              <div
+                style={{
+                  height: `${recipeVirtualizer.getTotalSize()}px`,
+                  width: "100%",
+                  position: "relative",
+                }}
+              >
+                {recipeVirtualizer.getVirtualItems().map((virtualItem) => {
+                  const product = filteredBlueprints[virtualItem.index];
+                  if (!product) return null;
+                  const isUsageOpen = openRecipeUsageProductId === product.id;
+                  const linkedProducts = recipeUsageByProductId[product.id] ?? [];
 
-              return (
-                <div
-                  className={cx("production-recipe-card", product.id === selectedProductId && "selected")}
-                  key={product.id}
-                  onClick={() => {
-                    selectProductionCatalogProduct(product.id);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
-                    selectProductionCatalogProduct(product.id);
-                  }}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <div className="production-recipe-card-header">
-                    <strong>{product.name}</strong>
-                    <span className="production-recipe-card-actions">
-                      {product.type === "semi_finished" ? (
-                        <button
-                          aria-expanded={isUsageOpen}
-                          aria-label={`Voir les produits qui utilisent ${product.name}`}
-                          className="production-recipe-usage-button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setOpenRecipeUsageProductId((current) => (current === product.id ? null : product.id));
-                          }}
-                          type="button"
-                        >
-                          <AppIcon name="search" />
-                        </button>
-                      ) : null}
-                      <span className="production-active-pill">Actif</span>
-                    </span>
-                  </div>
-                  <div className="production-recipe-card-meta">
-                    <ProductTypeBadge type={product.type} />
-                    <span>{formatCategory(product.category)}</span>
-                    <span>{product.componentCount} comp.</span>
-                  </div>
-                  {isUsageOpen ? (
-                    <div className="production-recipe-usage-popover" onClick={(event) => event.stopPropagation()}>
-                      {linkedProducts.length === 0 ? (
-                        <p>Aucun produit actif n'utilise ce semi-fini.</p>
-                      ) : (
-                        linkedProducts.map((linkedProduct) => (
-                          <button
-                            key={linkedProduct.id}
-                            onClick={() => {
-                              selectProductionCatalogProduct(linkedProduct.id);
-                            }}
-                            type="button"
-                          >
-                            <strong>{linkedProduct.name}</strong>
-                            <span>
-                              {typeLabels[linkedProduct.type]} · {formatCategory(linkedProduct.category)}
-                            </span>
-                          </button>
-                        ))
-                      )}
+                  return (
+                    <div
+                      data-index={virtualItem.index}
+                      key={product.id}
+                      ref={recipeVirtualizer.measureElement}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        transform: `translateY(${virtualItem.start}px)`,
+                        paddingBottom: "6px",
+                        zIndex: isUsageOpen ? 50 : 1,
+                      }}
+                    >
+                      <ProductionRecipeCard
+                        isSelected={product.id === selectedProductId}
+                        isUsageOpen={isUsageOpen}
+                        linkedProducts={linkedProducts}
+                        onPrefetch={handlePrefetchProduct}
+                        onSelect={handleSelectProduct}
+                        onToggleUsage={handleToggleUsage}
+                        product={product}
+                      />
                     </div>
-                  ) : null}
-                </div>
-              );
-            })}
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
         </AppCardAside>
 
@@ -4826,7 +5157,7 @@ function keyProductionLotDraftsBySchemaRows(
   lotDraftsByProductId: Record<string, ProductionLotDraft>,
   result: Record<string, ProductionLotDraft> = {},
 ) {
-  const draft = lotDraftsByProductId[node.id];
+  const draft = (node.traceabilityNodeId && lotDraftsByProductId[node.traceabilityNodeId]) || lotDraftsByProductId[node.id];
   if (draft) result[rowKey] = draft;
   orderProductionSchemaNodes(node.children).forEach((child, index) =>
     keyProductionLotDraftsBySchemaRows(child, productionSchemaRowKey(child, rowKey, index), lotDraftsByProductId, result),
@@ -5657,11 +5988,25 @@ function FabricationList({
     return [...new Set(products.flatMap((product) => product.componentNames))].sort((left, right) => left.localeCompare(right, "fr"));
   }, [products]);
 
+  const indexedProducts = useMemo(() => {
+    return products.map((product) => ({
+      ...product,
+      _normName: normalizeSearchText(product.name),
+      _normType: normalizeSearchText(`${typeLabels[product.type] ?? ""} ${product.type}`),
+      _normCategory: normalizeSearchText(`${formatCategory(product.category)} ${product.category ?? ""}`),
+      _normRecipeStatus: normalizeSearchText(`${recipeLabels[product.recipeStatus] ?? ""} ${product.recipeStatus}`),
+      _normComponents: product.componentNames.map(normalizeSearchText),
+      _normComponentCount: String(product.componentCount || 0),
+      _normLastUpdated: fastFormatDateOnly(product.type !== "raw" && product.schemaUpdatedAt ? product.schemaUpdatedAt : product.lastUpdated) ?? "",
+    }));
+  }, [products]);
+
+  const preparedFilters = useMemo(() => prepareProductColumnFilters(columnFilters), [columnFilters]);
+
   const filteredProducts = useMemo(() => {
-    return products.filter((product) => {
-      return matchesProductColumnFilters(product, columnFilters);
-    });
-  }, [columnFilters, products]);
+    if (preparedFilters.length === 0) return indexedProducts;
+    return indexedProducts.filter((product) => productMatchesPreparedFilters(product, preparedFilters));
+  }, [indexedProducts, preparedFilters]);
 
   return (
     <main className="page">
@@ -6580,6 +6925,92 @@ function SelectedProductPanel({
   );
 }
 
+type ProductTableRowProps = {
+  product: Product;
+  isSelected: boolean;
+  isCurrentSelected: boolean;
+  onToggleSelect: (productId: string, checked: boolean) => void;
+  onSelect: (product: Product) => void;
+  onEdit: (product: Product) => void;
+};
+
+const ProductTableRow = memo(
+  function ProductTableRow({
+    product,
+    isSelected,
+    isCurrentSelected,
+    onToggleSelect,
+    onSelect,
+    onEdit,
+  }: ProductTableRowProps) {
+    const actor =
+      product.type !== "raw" && (product.schemaUpdatedBy.id || product.schemaUpdatedBy.email || product.schemaUpdatedBy.name)
+        ? product.schemaUpdatedBy
+        : product.updatedBy.id || product.updatedBy.email || product.updatedBy.name
+          ? product.updatedBy
+          : product.createdBy;
+
+    const actorLabel = product.type !== "raw" && product.recipeStatus === "active" ? "Schema enregistre par" : "Modifie par";
+    const dateStr = (product as any)._normLastUpdated || formatDate(product.type !== "raw" && product.schemaUpdatedAt ? product.schemaUpdatedAt : product.lastUpdated);
+
+    return (
+      <tr className={cx(isCurrentSelected && "selected-row")}>
+        <td className="actor-cell">
+          <UserProfileAvatar actor={actor} label={actorLabel} />
+        </td>
+        <td className="utility-column">
+          <button className="table-icon-button muted" title="Reordonner" type="button">
+            <AppIcon name="grip" />
+          </button>
+        </td>
+        <td className="select-column">
+          <label className="table-checkbox">
+            <input
+              aria-label={`Selectionner ${product.name}`}
+              checked={isSelected}
+              onChange={(event) => onToggleSelect(product.id, event.target.checked)}
+              type="checkbox"
+            />
+            <span></span>
+          </label>
+        </td>
+        <td>{product.name}</td>
+        <td>
+          <ProductTypeBadge type={product.type} />
+        </td>
+        <td>{formatCategory(product.category)}</td>
+        <td>
+          <RecipeBadge status={product.recipeStatus} />
+        </td>
+        <td>{product.componentCount || "--"}</td>
+        <td>{dateStr}</td>
+        <td>
+          <button className="table-link" disabled={product.type === "raw"} onClick={() => onSelect(product)} type="button">
+            {product.type === "raw" ? "Composant" : product.recipeStatus === "active" ? "Modifier" : "Creer"}
+          </button>
+        </td>
+        <td className="actions-column">
+          <ProductTableActionsDropdown onEdit={() => onEdit(product)} />
+        </td>
+      </tr>
+    );
+  },
+  (prev, next) => {
+    return (
+      prev.product.id === next.product.id &&
+      prev.isSelected === next.isSelected &&
+      prev.isCurrentSelected === next.isCurrentSelected &&
+      prev.product.name === next.product.name &&
+      prev.product.type === next.product.type &&
+      prev.product.category === next.product.category &&
+      prev.product.recipeStatus === next.product.recipeStatus &&
+      prev.product.componentCount === next.product.componentCount &&
+      prev.product.lastUpdated === next.product.lastUpdated &&
+      prev.product.schemaUpdatedAt === next.product.schemaUpdatedAt
+    );
+  },
+);
+
 function ProductTable({
   columnFilters,
   componentFilterSuggestions,
@@ -6597,26 +7028,44 @@ function ProductTable({
   onEdit: (product: Product) => void;
   onSelect: (product: Product) => void;
 }) {
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const selectedProductIdsSet = useMemo(() => new Set(selectedProductIds), [selectedProductIds]);
   const visibleProductIds = useMemo(() => filteredProducts.map((product) => product.id), [filteredProducts]);
-  const selectedVisibleCount = visibleProductIds.filter((id) => selectedProductIds.includes(id)).length;
+  const selectedVisibleCount = useMemo(
+    () => visibleProductIds.filter((id) => selectedProductIdsSet.has(id)).length,
+    [visibleProductIds, selectedProductIdsSet],
+  );
   const allVisibleSelected = visibleProductIds.length > 0 && selectedVisibleCount === visibleProductIds.length;
   const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected;
 
-  function toggleAllVisibleProducts(checked: boolean) {
+  const rowVirtualizer = useVirtualizer({
+    count: filteredProducts.length,
+    getScrollElement: () => tableScrollRef.current,
+    estimateSize: () => 48,
+    overscan: 10,
+    getItemKey: (index) => filteredProducts[index]?.id ?? index,
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const totalSize = rowVirtualizer.getTotalSize();
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start ?? 0 : 0;
+  const paddingBottom = virtualRows.length > 0 ? totalSize - (virtualRows[virtualRows.length - 1]?.end ?? 0) : 0;
+
+  const toggleAllVisibleProducts = useCallback((checked: boolean) => {
     setSelectedProductIds((current) => {
       const visibleIds = new Set(visibleProductIds);
       if (!checked) return current.filter((id) => !visibleIds.has(id));
       return [...new Set([...current, ...visibleProductIds])];
     });
-  }
+  }, [visibleProductIds]);
 
-  function toggleProductSelection(productId: string, checked: boolean) {
+  const toggleProductSelection = useCallback((productId: string, checked: boolean) => {
     setSelectedProductIds((current) => {
       if (!checked) return current.filter((id) => id !== productId);
       return current.includes(productId) ? current : [...current, productId];
     });
-  }
+  }, []);
 
   return (
     <AppCard className="product-table-panel">
@@ -6634,7 +7083,7 @@ function ProductTable({
         <ProductColumnFilterBar componentSuggestions={componentFilterSuggestions} filters={columnFilters} onFiltersChange={onColumnFiltersChange} />
       </div>
 
-      <div className="table-wrap">
+      <div className="table-wrap" ref={tableScrollRef}>
         <table className="data-table">
           <thead>
             <tr>
@@ -6668,56 +7117,31 @@ function ProductTable({
             {filteredProducts.length === 0 ? (
               <TableEmpty colSpan={11}>Aucun produit trouve dans Supabase.</TableEmpty>
             ) : null}
-            {filteredProducts.map((product) => (
-              <tr className={cx(product.id === selectedProductId && "selected-row")} key={product.id}>
-                <td className="actor-cell">
-                  <UserProfileAvatar
-                    actor={
-                      product.type !== "raw" && (product.schemaUpdatedBy.id || product.schemaUpdatedBy.email || product.schemaUpdatedBy.name)
-                        ? product.schemaUpdatedBy
-                        : product.updatedBy.id || product.updatedBy.email || product.updatedBy.name
-                          ? product.updatedBy
-                          : product.createdBy
-                    }
-                    label={product.type !== "raw" && product.recipeStatus === "active" ? "Schema enregistre par" : "Modifie par"}
-                  />
-                </td>
-                <td className="utility-column">
-                  <button className="table-icon-button muted" title="Reordonner" type="button">
-                    <AppIcon name="grip" />
-                  </button>
-                </td>
-                <td className="select-column">
-                  <label className="table-checkbox">
-                    <input
-                      aria-label={`Selectionner ${product.name}`}
-                      checked={selectedProductIds.includes(product.id)}
-                      onChange={(event) => toggleProductSelection(product.id, event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span></span>
-                  </label>
-                </td>
-                <td>{product.name}</td>
-                <td>
-                  <ProductTypeBadge type={product.type} />
-                </td>
-                <td>{formatCategory(product.category)}</td>
-                <td>
-                  <RecipeBadge status={product.recipeStatus} />
-                </td>
-                <td>{product.componentCount || "--"}</td>
-                <td>{formatDate(product.type !== "raw" && product.schemaUpdatedAt ? product.schemaUpdatedAt : product.lastUpdated)}</td>
-                <td>
-                  <button className="table-link" disabled={product.type === "raw"} onClick={() => onSelect(product)} type="button">
-                    {product.type === "raw" ? "Composant" : product.recipeStatus === "active" ? "Modifier" : "Creer"}
-                  </button>
-                </td>
-                <td className="actions-column">
-                  <ProductTableActionsDropdown onEdit={() => onEdit(product)} />
-                </td>
+            {paddingTop > 0 ? (
+              <tr>
+                <td colSpan={11} style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} />
               </tr>
-            ))}
+            ) : null}
+            {virtualRows.map((virtualRow) => {
+              const product = filteredProducts[virtualRow.index];
+              if (!product) return null;
+              return (
+                <ProductTableRow
+                  key={product.id}
+                  product={product}
+                  isSelected={selectedProductIdsSet.has(product.id)}
+                  isCurrentSelected={product.id === selectedProductId}
+                  onToggleSelect={toggleProductSelection}
+                  onSelect={onSelect}
+                  onEdit={onEdit}
+                />
+              );
+            })}
+            {paddingBottom > 0 ? (
+              <tr>
+                <td colSpan={11} style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} />
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </div>
@@ -6874,7 +7298,7 @@ function ProductColumnFilterBar({
     filterCommitTimerRef.current = window.setTimeout(() => {
       filterCommitTimerRef.current = null;
       onFiltersChange(nextFilters);
-    }, 120);
+    }, 25);
   }
 
   function updateDraftFilters(nextFilters: ProductColumnFilter[]) {
@@ -7124,39 +7548,145 @@ function getProductColumnValueSuggestions(
   return suggestions.filter((name) => normalizeSearchText(name).includes(normalizedQuery));
 }
 
-function matchesProductColumnFilters(product: Product, filters: ProductColumnFilter[]) {
-  const activeFilters = filters.filter((filter) => normalizeSearchText(filter.value));
-  if (activeFilters.length === 0) return true;
+type PreparedProductFilter = {
+  column: ProductColumnFilterKey;
+  normalizedValue: string;
+};
 
-  return activeFilters.every((filter) =>
-    getProductColumnFilterValues(product, filter.column).some((value) => normalizeSearchText(value).includes(normalizeSearchText(filter.value))),
-  );
+function prepareProductColumnFilters(filters: ProductColumnFilter[]): PreparedProductFilter[] {
+  const prepared: PreparedProductFilter[] = [];
+  for (let i = 0; i < filters.length; i++) {
+    const norm = normalizeSearchText(filters[i].value);
+    if (norm) {
+      prepared.push({ column: filters[i].column, normalizedValue: norm });
+    }
+  }
+  return prepared;
 }
 
-function getProductColumnFilterValues(product: Product, column: ProductColumnFilterKey) {
-  const values: Record<ProductColumnFilterKey, string[]> = {
-    name: [product.name],
-    type: [typeLabels[product.type], product.type],
-    category: [formatCategory(product.category), product.category ?? ""],
-    recipeStatus: [recipeLabels[product.recipeStatus], product.recipeStatus],
-    components: product.componentNames,
-    componentCount: [String(product.componentCount || 0), ...product.componentNames],
-    lastUpdated: [formatDate(product.lastUpdated), product.lastUpdated],
-    lot: [],
-    productionDate: [],
-    confirmedAt: [],
-  };
+function productMatchesPreparedFilters(product: Product, preparedFilters: PreparedProductFilter[]): boolean {
+  for (let i = 0; i < preparedFilters.length; i++) {
+    const filter = preparedFilters[i];
+    const needle = filter.normalizedValue;
 
-  return values[column];
+    switch (filter.column) {
+      case "name": {
+        const normName = (product as any)._normName ?? normalizeSearchText(product.name);
+        if (!normName.includes(needle)) return false;
+        break;
+      }
+      case "type": {
+        const normType = (product as any)._normType ?? normalizeSearchText(`${typeLabels[product.type] ?? ""} ${product.type}`);
+        if (!normType.includes(needle)) return false;
+        break;
+      }
+      case "category": {
+        const normCat = (product as any)._normCategory ?? normalizeSearchText(`${formatCategory(product.category)} ${product.category ?? ""}`);
+        if (!normCat.includes(needle)) return false;
+        break;
+      }
+      case "recipeStatus": {
+        const normStatus = (product as any)._normRecipeStatus ?? normalizeSearchText(`${recipeLabels[product.recipeStatus] ?? ""} ${product.recipeStatus}`);
+        if (!normStatus.includes(needle)) return false;
+        break;
+      }
+      case "components": {
+        const normComponents: string[] = (product as any)._normComponents ?? product.componentNames.map(normalizeSearchText);
+        let matched = false;
+        for (let j = 0; j < normComponents.length; j++) {
+          if (normComponents[j].includes(needle)) {
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) return false;
+        break;
+      }
+      case "componentCount": {
+        const countStr = (product as any)._normComponentCount ?? String(product.componentCount || 0);
+        if (countStr.includes(needle)) break;
+        const normComponents: string[] = (product as any)._normComponents ?? product.componentNames.map(normalizeSearchText);
+        let matched = false;
+        for (let j = 0; j < normComponents.length; j++) {
+          if (normComponents[j].includes(needle)) {
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) return false;
+        break;
+      }
+      case "lastUpdated": {
+        const normDate = (product as any)._normLastUpdated ?? (fastFormatDateOnly(product.type !== "raw" && product.schemaUpdatedAt ? product.schemaUpdatedAt : product.lastUpdated) ?? "");
+        if (!normDate.includes(needle) && !String(product.lastUpdated).includes(needle)) return false;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return true;
+}
+
+function matchesProductColumnFilters(product: Product, filters: ProductColumnFilter[]) {
+  const prepared = prepareProductColumnFilters(filters);
+  if (prepared.length === 0) return true;
+  return productMatchesPreparedFilters(product, prepared);
+}
+
+function batchMatchesPreparedFilters(batch: ProductionBatch, preparedFilters: PreparedProductFilter[]): boolean {
+  for (let i = 0; i < preparedFilters.length; i++) {
+    const filter = preparedFilters[i];
+    const needle = filter.normalizedValue;
+
+    switch (filter.column) {
+      case "name": {
+        const normName = normalizeSearchText(`${batch.productName} ${batch.productCode}`);
+        if (!normName.includes(needle)) return false;
+        break;
+      }
+      case "type": {
+        const normType = normalizeSearchText(`${typeLabels[batch.productType] ?? ""} ${batch.productType}`);
+        if (!normType.includes(needle)) return false;
+        break;
+      }
+      case "category": {
+        const normCat = normalizeSearchText(`${formatCategory(batch.category)} ${batch.category ?? ""}`);
+        if (!normCat.includes(needle)) return false;
+        break;
+      }
+      case "lot": {
+        const normLot = normalizeSearchText(batch.generatedLot);
+        if (!normLot.includes(needle)) return false;
+        break;
+      }
+      case "productionDate": {
+        const normDate = fastFormatDateOnly(batch.productionDate) ?? "";
+        if (!normDate.includes(needle) && !String(batch.productionDate).includes(needle)) return false;
+        break;
+      }
+      case "confirmedAt": {
+        const conf = batch.confirmedAt ?? batch.createdAt;
+        const normConf = fastFormatDateOnly(conf) ?? "";
+        if (!normConf.includes(needle) && !String(conf).includes(needle)) return false;
+        break;
+      }
+      case "componentCount": {
+        const countStr = String(batch.consumedLotCount || 0);
+        if (!countStr.includes(needle)) return false;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return true;
 }
 
 function matchesProductionHistoryColumnFilters(batch: ProductionBatch, filters: ProductColumnFilter[]) {
-  const activeFilters = filters.filter((filter) => normalizeSearchText(filter.value));
-  if (activeFilters.length === 0) return true;
-
-  return activeFilters.every((filter) =>
-    getProductionHistoryColumnFilterValues(batch, filter.column).some((value) => normalizeSearchText(value).includes(normalizeSearchText(filter.value))),
-  );
+  const prepared = prepareProductColumnFilters(filters);
+  if (prepared.length === 0) return true;
+  return batchMatchesPreparedFilters(batch, prepared);
 }
 
 function matchesProductionHistorySourceFilter(batch: ProductionBatch, filter: ProductionHistorySourceFilter) {
@@ -8041,6 +8571,78 @@ function TraceabilityLotDropdown({
   );
 }
 
+type TraceabilityTableRowProps = {
+  product: Product;
+  lotOptions: ProductLotOption[];
+  selectedLot: ProductLotOption | null;
+  rqActor: AuditActor;
+  countLabel: string;
+  onSelectLot: (productId: string, lotId: string) => void;
+};
+
+const TraceabilityTableRow = memo(
+  function TraceabilityTableRow({
+    product,
+    lotOptions,
+    selectedLot,
+    rqActor,
+    countLabel,
+    onSelectLot,
+  }: TraceabilityTableRowProps) {
+    const isManufactured = product.type !== "raw";
+
+    return (
+      <tr>
+        <td className="actor-cell">
+          <UserProfileAvatar actor={rqActor} label="Responsable Qualité" />
+        </td>
+        <td>
+          <div className="product-table-identity">
+            <strong>{product.name}</strong>
+            {product.code ? <span className="muted">{product.code}</span> : null}
+          </div>
+        </td>
+        <td>
+          <ProductTypeBadge type={product.type} />
+        </td>
+        <td>{formatCategory(product.category)}</td>
+        <td>
+          {isManufactured ? (
+            <span className="badge muted">{product.componentNames.length} composant(s)</span>
+          ) : (
+            <span className="muted">—</span>
+          )}
+        </td>
+        <td>
+          <span className={cx("badge", isManufactured ? "success" : "info")}>{countLabel}</span>
+        </td>
+        <td>
+          <TraceabilityLotDropdown
+            lots={lotOptions}
+            onSelectLot={(lot) => onSelectLot(product.id, lot.id)}
+            selectedLot={selectedLot}
+          />
+        </td>
+        <td>
+          <div className="actor-name-cell">
+            <strong>{rqActor.name || rqActor.email || "Système"}</strong>
+          </div>
+        </td>
+      </tr>
+    );
+  },
+  (prev, next) => {
+    return (
+      prev.product.id === next.product.id &&
+      prev.selectedLot?.id === next.selectedLot?.id &&
+      prev.countLabel === next.countLabel &&
+      prev.product.name === next.product.name &&
+      prev.product.code === next.product.code &&
+      prev.lotOptions.length === next.lotOptions.length
+    );
+  },
+);
+
 function TraceabilityModule({
   products,
   productionBatches,
@@ -8050,6 +8652,7 @@ function TraceabilityModule({
   productionBatches: ProductionBatch[];
   receptionBatches: ReceptionBatch[];
 }) {
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
   const [columnFilters, setColumnFilters] = usePersistentState<ProductColumnFilter[]>("traceability.columnFilters", []);
   const [selectedLotIdsByProductId, setSelectedLotIdsByProductId] = usePersistentState<Record<string, string>>("traceability.selectedLotIds", {});
   const [fetchedLotsByProductId, setFetchedLotsByProductId] = useState<Record<string, ProductLotHistoryItem[]>>({});
@@ -8061,9 +8664,45 @@ function TraceabilityModule({
     return [...new Set(products.flatMap((product) => product.componentNames))].sort((left, right) => left.localeCompare(right, "fr"));
   }, [products]);
 
+  const indexedProducts = useMemo(() => {
+    return products.map((product) => ({
+      ...product,
+      _normName: normalizeSearchText(product.name),
+      _normType: normalizeSearchText(`${typeLabels[product.type] ?? ""} ${product.type}`),
+      _normCategory: normalizeSearchText(`${formatCategory(product.category)} ${product.category ?? ""}`),
+      _normRecipeStatus: normalizeSearchText(`${recipeLabels[product.recipeStatus] ?? ""} ${product.recipeStatus}`),
+      _normComponents: product.componentNames.map(normalizeSearchText),
+      _normComponentCount: String(product.componentCount || 0),
+      _normLastUpdated: fastFormatDateOnly(product.type !== "raw" && product.schemaUpdatedAt ? product.schemaUpdatedAt : product.lastUpdated) ?? "",
+    }));
+  }, [products]);
+
+  const preparedFilters = useMemo(() => prepareProductColumnFilters(columnFilters), [columnFilters]);
+
   const filteredProducts = useMemo(() => {
-    return products.filter((product) => matchesProductColumnFilters(product, columnFilters));
-  }, [columnFilters, products]);
+    if (preparedFilters.length === 0) return indexedProducts;
+    return indexedProducts.filter((product) => productMatchesPreparedFilters(product, preparedFilters));
+  }, [indexedProducts, preparedFilters]);
+
+  const validatedBatchesByProductId = useMemo(() => {
+    const map = new Map<string, ProductionBatch[]>();
+    const sortedBatches = [...productionBatches]
+      .filter((batch) => batch.status === "validated")
+      .sort((left, right) => {
+        const leftDate = left.productionDate || left.confirmedAt || left.createdAt;
+        const rightDate = right.productionDate || right.confirmedAt || right.createdAt;
+        return rightDate.localeCompare(leftDate);
+      });
+    for (const batch of sortedBatches) {
+      let list = map.get(batch.productId);
+      if (!list) {
+        list = [];
+        map.set(batch.productId, list);
+      }
+      list.push(batch);
+    }
+    return map;
+  }, [productionBatches]);
 
   useEffect(() => {
     let cancelled = false;
@@ -8090,13 +8729,7 @@ function TraceabilityModule({
   }, [fetchedLotsByProductId, filteredProducts]);
 
   function productionBatchesForProduct(productId: string) {
-    return productionBatches
-      .filter((batch) => batch.productId === productId && batch.status === "validated")
-      .sort((left, right) => {
-        const leftDate = left.productionDate || left.confirmedAt || left.createdAt;
-        const rightDate = right.productionDate || right.confirmedAt || right.createdAt;
-        return new Date(rightDate).getTime() - new Date(leftDate).getTime();
-      });
+    return validatedBatchesByProductId.get(productId) ?? [];
   }
 
   function buildTraceabilityLotOptionsForProduct(
@@ -8258,6 +8891,23 @@ function TraceabilityModule({
     }
   }
 
+  const rowVirtualizer = useVirtualizer({
+    count: filteredProducts.length,
+    getScrollElement: () => tableScrollRef.current,
+    estimateSize: () => 52,
+    overscan: 10,
+    getItemKey: (index) => filteredProducts[index]?.id ?? index,
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const totalSize = rowVirtualizer.getTotalSize();
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start ?? 0 : 0;
+  const paddingBottom = virtualRows.length > 0 ? totalSize - (virtualRows[virtualRows.length - 1]?.end ?? 0) : 0;
+
+  const handleSelectLot = useCallback((productId: string, lotId: string) => {
+    setSelectedLotIdsByProductId((current) => ({ ...current, [productId]: lotId }));
+  }, []);
+
   return (
     <>
       <main className="page">
@@ -8279,7 +8929,7 @@ function TraceabilityModule({
           />
         </div>
 
-        <div className="table-wrap">
+        <div className="table-wrap traceability-table-wrap" ref={tableScrollRef}>
           <table className="data-table">
             <thead>
               <tr>
@@ -8297,10 +8947,17 @@ function TraceabilityModule({
               {filteredProducts.length === 0 ? (
                 <TableEmpty colSpan={8}>Aucun produit trouvé.</TableEmpty>
               ) : null}
-              {filteredProducts.map((product) => {
-                const isManufactured = product.type !== "raw";
+              {paddingTop > 0 ? (
+                <tr>
+                  <td colSpan={8} style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} />
+                </tr>
+              ) : null}
+              {virtualRows.map((virtualRow) => {
+                const product = filteredProducts[virtualRow.index];
+                if (!product) return null;
 
-                const prodBatchesForProduct = productionBatchesForProduct(product.id);
+                const isManufactured = product.type !== "raw";
+                const prodBatches = productionBatchesForProduct(product.id);
                 const lotOptions = buildTraceabilityLotOptionsForProduct(product, fetchedLotsByProductId);
                 const selectedLot = selectedTraceabilityLotForProduct(product, lotOptions);
 
@@ -8308,55 +8965,28 @@ function TraceabilityModule({
                   selectedLot?.actor && (selectedLot.actor.name || selectedLot.actor.email)
                     ? selectedLot.actor
                     : isManufactured
-                      ? (prodBatchesForProduct[0]?.confirmedBy ?? product.schemaUpdatedBy ?? product.updatedBy ?? product.createdBy)
+                      ? (prodBatches[0]?.confirmedBy ?? product.schemaUpdatedBy ?? product.updatedBy ?? product.createdBy)
                       : (product.updatedBy ?? product.createdBy);
 
-                const countLabel = isManufactured
-                  ? `${prodBatchesForProduct.length}`
-                  : `${lotOptions.length}`;
+                const countLabel = isManufactured ? `${prodBatches.length}` : `${lotOptions.length}`;
 
                 return (
-                  <tr key={product.id}>
-                    <td className="actor-cell">
-                      <UserProfileAvatar actor={rqActor} label="Responsable Qualité" />
-                    </td>
-                    <td>
-                      <div className="product-table-identity">
-                        <strong>{product.name}</strong>
-                        {product.code ? <span className="muted">{product.code}</span> : null}
-                      </div>
-                    </td>
-                    <td>
-                      <ProductTypeBadge type={product.type} />
-                    </td>
-                    <td>{formatCategory(product.category)}</td>
-                    <td>
-                      {isManufactured ? (
-                        <span className="badge muted">{product.componentNames.length} composant(s)</span>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                    <td>
-                      <span className={cx("badge", isManufactured ? "success" : "info")}>{countLabel}</span>
-                    </td>
-                    <td>
-                      <TraceabilityLotDropdown
-                        lots={lotOptions}
-                        onSelectLot={(lot) =>
-                          setSelectedLotIdsByProductId((current) => ({ ...current, [product.id]: lot.id }))
-                        }
-                        selectedLot={selectedLot}
-                      />
-                    </td>
-                    <td>
-                      <div className="actor-name-cell">
-                        <strong>{rqActor.name || rqActor.email || "Système"}</strong>
-                      </div>
-                    </td>
-                  </tr>
+                  <TraceabilityTableRow
+                    countLabel={countLabel}
+                    key={product.id}
+                    lotOptions={lotOptions}
+                    onSelectLot={handleSelectLot}
+                    product={product}
+                    rqActor={rqActor}
+                    selectedLot={selectedLot}
+                  />
                 );
               })}
+              {paddingBottom > 0 ? (
+                <tr>
+                  <td colSpan={8} style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} />
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>
@@ -11570,6 +12200,12 @@ function AppIcon({ name }: { name: IconName }) {
       </>
     ),
     moon: <path d="M20 15.4A8 8 0 0 1 8.6 4 8.5 8.5 0 1 0 20 15.4z" />,
+    neobrutalism: (
+      <>
+        <rect x="4" y="4" width="11" height="11" />
+        <path d="M9 15v4h10V9h-4" />
+      </>
+    ),
   };
 
   return (
@@ -11786,26 +12422,17 @@ function buildCalendarCells(monthDate: Date) {
 }
 
 function formatCalendarMonth(value: Date) {
-  return capitalize(
-    new Intl.DateTimeFormat("fr-FR", {
-      month: "long",
-      year: "numeric",
-    }).format(value),
-  );
+  return capitalize(frenchMonthYearFormatter.format(value));
 }
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat("fr-FR").format(parseInputDate(value) ?? new Date(value));
+  const fast = fastFormatDateOnly(value);
+  if (fast) return fast;
+  return formatFrenchDate(value);
 }
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("fr-FR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  return formatFrenchDateTime(value);
 }
 
 function formatUpdaterDate(value: string) {

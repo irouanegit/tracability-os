@@ -10,9 +10,12 @@ Use it as context before touching code, SQL imports, Supabase policies, release 
 - Domain: bakery/pastry production traceability for Casabianca.
 - Main workspace path: `C:\Users\user\myprojects\solution traçabilité`
 - Current app type: Tauri desktop app with a React/Vite frontend and Supabase backend.
-- Current source version: `0.1.30` at the time this document was last updated.
+- Current source version: `0.1.56` at the time this document was last updated on `2026-08-30`.
 - Current NSIS installer path pattern:
   `src-tauri\target\release\bundle\nsis\Tracability OS_<version>_x64-setup.exe`
+- Current release hosting: GitHub Releases on `irouanegit/tracability-os`.
+- Current updater feed:
+  `https://github.com/irouanegit/tracability-os/releases/latest/download/latest.json`
 
 The app tracks:
 
@@ -23,6 +26,173 @@ The app tracks:
 - Traceability from produced products back to raw material and semi-finished lots.
 - PDF traceability forms for production and reception.
 - User audit tracking for who created/modified/validated/confirmed critical records.
+
+## Latest Handoff Update - 2026-08-30
+
+This is the current source-of-truth snapshot for the most recent work. Some older sections below are preserved for history and may duplicate earlier guidance.
+
+### Release and Updater State
+
+- The app uses Tauri updater artifacts hosted on GitHub Releases (`irouanegit/tracability-os`).
+- Latest known published release: `app-v0.1.56`.
+- Latest known release URL:
+  `https://github.com/irouanegit/tracability-os/releases/tag/app-v0.1.56`
+- Latest signed installer:
+  `C:\Users\user\myprojects\solution traçabilité\src-tauri\target\release\bundle\nsis\Tracability OS_0.1.56_x64-setup.exe`
+- Release `0.1.56` fixes the Livraisons lot filtering to ensure available and pre-selected production lots are strictly constrained by the chosen delivery date (`productionDate <= deliveryDate`).
+- App updater endpoint in `src-tauri/tauri.conf.json`:
+  `https://github.com/irouanegit/tracability-os/releases/latest/download/latest.json`
+- Older installed builds that still point to Supabase Storage needed a bridge/latest update to move them onto the GitHub feed. Future normal releases should be GitHub-only.
+- Supabase Storage release publishing was replaced because update downloads quickly consumed Supabase egress. Do not switch future releases back to Supabase Storage unless the user explicitly asks.
+- Current release commands:
+  - `npm.cmd run release:build:signed`
+  - `npm.cmd run release:github:dry-run`
+  - `npm.cmd run release:github`
+- Signing key path used locally:
+  `C:\Users\user\.tauri\tracability-os.key`
+- Tauri updater artifacts are enabled by `"createUpdaterArtifacts": true` in `src-tauri/tauri.conf.json`.
+- Starting with `0.1.52`, the app checks for updates shortly after login, every 15 minutes while open, and when the user returns after at least 5 minutes. A one-time in-app notice appears and the updater icon remains highlighted while the update is available.
+- The app window is configured to open maximized by default while keeping normal minimize/maximize/close buttons.
+- A black terminal window used to appear at launch. If it returns, inspect Tauri/Rust console subsystem or launcher behavior before assuming it is intentional.
+
+### Supabase Egress Guardrail
+
+- GitHub Releases now serves all updater metadata, installers, and signatures. Current Tauri updater configuration must remain GitHub-only; do not publish normal installers to Supabase Storage.
+- Supabase egress is cumulative for the billing cycle. Deleting old release files or moving an updater feed does not reduce already recorded egress; only a cycle reset does.
+- In August 2026, organization egress continued growing after the updater migration. The former client-side Planification auto-confirm runner was identified as a likely recurring source because every authenticated device queried due plans every 15 seconds. It is disabled in release `0.1.55`.
+- All users should update to `0.1.55` before judging the new egress rate. If usage still grows unusually after that, use Supabase Usage/Observability to identify the largest service and API paths. The unlimited production/reception history views and calendar refreshes are the next areas to audit; do not reintroduce polling without measuring its response size and cadence.
+
+### Current Git State Warning
+
+- Latest committed baseline is still `0c54836 Release 0.1.45 updater changes`.
+- The working tree intentionally contains the later `0.1.55` release metadata, production traceability fixes, SQL migration/script changes, tests, styling, and PDF work. Several files are untracked, including migrations 037/038 and focused production-consumption test/helpers.
+- Treat all existing working-tree changes as user/project work. Do not reset, discard, or overwrite them while handling a narrower task.
+
+### Dashboard Is Now Calendar
+
+- The former Dashboard screen was changed into a comprehensive calendar screen.
+- Sidebar label should be `Calendrier`, not `Dashboard`.
+- The calendar uses a smoother PMS-inspired layout with month grid and right details sidebar.
+- Each day cell shows:
+  - day number in a circular background for all days, including days without activity,
+  - activity count at the top/right area,
+  - compact markers labelled `production`, `réception`, and `planification`.
+- The top calendar summary labels were removed because the same counts exist in the sidebar/topbar.
+- The details sidebar has tabs:
+  - `Productions`
+  - `Réceptions`
+  - `Planification`
+- The details sidebar also has a search bar.
+- Activities in the details sidebar should be ordered newest to oldest.
+
+### Theme UX
+
+- Theme selection is now a `Theme` button that opens a popover with explicit theme choices.
+- The user disliked cycling themes one click at a time.
+- `Verre` theme should stay disabled/hidden and must not appear as an option.
+- Sidebar branding should show only `Tracability OS`; remove old text such as `Boulangerie Pro`.
+- The app logo must render in its original form and color regardless of selected theme.
+- A complete Neo-Brutalism research and implementation brief is available at `docs/neo-brutalism-theme-reference.md`.
+- The intended app direction is Soft Neo-Brutalism: strong borders, flat categorical colors, zero-blur offset shadows, and physical button states, while dense tables, forms, calendars, planning, and traceability workflows remain calm and mechanically aligned.
+- Soft Neo-Brutalism is implemented as a selectable `Neo-Brutalisme` theme in `src/App.tsx`.
+- Its complete style layer is isolated under `[data-theme="neobrutalism"]` at the end of `src/styles.css`, leaving Light, Dark, Neumorphism, and Clay unchanged.
+- The theme includes shell, navigation, panels, actions, forms, tables, badges, menus, popovers, calendar, planning, diagrams, dialogs, authentication, focus, scrollbars, and reduced-motion coverage.
+- Neo-Brutalism fonts are bundled locally for offline desktop use: Space Grotesk for headings/navigation, Inter for body and operational content, and Space Mono only for lots, dates/times, versions, and timeline identifiers.
+- Neumorphism fonts are bundled locally for offline desktop use: Manrope for headings, sidebar, and buttons; Inter for body, forms, and tables; Space Mono only for lots, dates/times, versions, and timeline identifiers.
+- Claymorphism fonts are bundled locally for offline desktop use: Nunito Sans for headings, sidebar, and buttons; Inter for body, forms, and tables; Space Mono only for lots, dates/times, versions, and timeline identifiers.
+
+### Main Loading Animation
+
+- The project includes `infinity-loop-stroke-spinner`.
+- The user approved using it as the main loading animation.
+- Previous old loading animation sometimes did not appear for other users because it was not reliable as a shared packaged app asset/flow. Prefer the new bundled spinner approach.
+
+### Production History
+
+- Production history currently has filters for:
+  - all,
+  - manual confirmations,
+  - planification/auto confirmations.
+- The visible rows can be filtered, but the counter should show the server total count, matching the original server-count approach.
+- The user later asked to temporarily remove the history limit so all confirmed products appear in the history table.
+- Production history deletion exists for selected confirmed products, but planification-linked production deletion must not break the plan runner. Deleting an auto-confirmed production removes that selected production/history item; the plan can still continue future planned occurrences if the plan itself remains active.
+
+### Confirm Lots Substitution Groups
+
+- Production Confirm Lots has explicit substitution groups. Do not make fuzzy substitutions outside these groups.
+- Recently added/confirmed substitution families include:
+  - praline group: `Praline amande`, `Praline arachide`, `Praline noisette`, `Praline pistache`,
+  - raw-material flour group for names containing keyword `farine`.
+- The product/component name for a substitution-group raw material should look visually the same weight as normal raw-material names. The small dropdown trigger may appear next to it, but the label should not look like a bold semi-finished parent.
+- `.production-component-substitution-label` must remain normal weight like an ordinary raw-material row; only the small dropdown trigger distinguishes a substitution choice.
+- Calendar indicator dots in Confirm Lots must appear for every date where the selected product has already been confirmed. A previous bug only marked one of several dates. Root cause was around matching loaded history/lot dates; preserve the broadened history/date matching approach.
+
+### Production Batch Lineage and Direct Consumption Boundary
+
+- Release `0.1.51` fixes a critical traceability error in nested semi-finished confirmation. Previously, selecting an old semi-finished batch could display or submit newly received raw lots instead of the exact lots saved when that child batch was confirmed.
+- The parent production must submit and consume only its direct active-blueprint components. Raw-material rows expanded below a selected semi-finished lot are historical provenance from that child batch; they are display-only and must never be validated as currently available or consumed again by the parent.
+- Selecting a semi-finished lot must hydrate the exact saved `traceability_snapshot` for that production batch, recursively through any deeper semi-finished children.
+- Snapshot drafts are keyed by their unique historical node identity. Repeated products in sibling branches must remain independent. For example, changing the selected `CROQUANT NOISETTE` lot must not change the raw lots shown under an unchanged `Praline noisette` lot.
+- `src/lib/productionConsumptionBoundary.ts` defines the frontend boundary used by manual confirmation: direct component selections are submitted; nested historical descendants are excluded.
+- `supabase/migrations/037_preserve_semi_finished_batch_lineage.sql` enforces the same boundary in v2/v3 RPCs, embeds selected child-batch snapshots into the new parent snapshot, and keeps plan node keys stable.
+- `src/lib/traceabilityApi.ts` supports the lineage-aware snapshot RPC and retains a compatibility fallback for databases that have not yet applied migration 037.
+- Legacy production snapshots created before migration 037 can contain the selected semi-finished fabrication lot without its raw-material descendants. `fetchProductionTraceabilitySnapshot` now detects those leaf branches, follows the exact lot `source_id` to the confirmed child batch, and recursively embeds that child's stored snapshot while preserving the historical parent structure. PDF export and history detail must always use this enriched API path instead of trusting a row's stored snapshot directly.
+- The production PDF must never substitute missing lineage with the literal `A completer`. If an exact historical child snapshot cannot be recovered, leave the raw-material fields blank rather than inventing data or rebuilding the branch from the current recipe.
+- Manual production still uses the v2/v1 path unless a `planId` is present. Planification uses v3 only when `planId` is present. Both paths must preserve the same direct-component boundary.
+- Focused verification passed at this handoff: production boundary tests `10/10`, planning tests `15/15`, frontend build, and `git diff --check`.
+- Migration 037 is not installed by the desktop updater. It must be executed separately in the Supabase project before relying on the complete `0.1.51` lineage fix.
+
+### Planification Safety
+
+- Planification auto-confirmation is intentionally disabled as of `2026-08-26` because the feature is not currently used and its former client runner polled Supabase from every authenticated device every 15 seconds. There must be no background due-plan polling and no automatic production confirmation until the user explicitly asks to re-enable it. Saved plans, the Planification screen, and manual confirmation from a selected plan remain available.
+- If auto-confirmation is ever re-enabled, it must never spam repeated confirmations for the same plan occurrence. It will require a low-egress scheduling design plus the database lock/check in `create_production_with_traceability_v3`; do not restore the former per-device 15-second runner.
+- Planification must never break manual confirmation in the Production screen.
+- Auto-confirmed lots must behave like normal manually confirmed lots for parent-product confirmation, dropdown eligibility, calendar indicators, and traceability.
+- Pausing/resuming/deleting/archiving plan series depends on RPCs. Missing RPCs previously caused `PGRST202` errors for:
+  - `update_production_plan_series_status`
+  - `archive_production_plan_series`
+- If those errors return, check whether the latest planification migration/RPC script was applied.
+- Saving a semi-finished plan should automatically refresh/reload compatible parent plan context so the saved semi-fini plan appears for the parent without a manual refresh action.
+
+### Delivery Workflow and PDF
+
+- Delivery history now supports deletion using the same keyboard-delete approach as production history.
+- The visible `Supprimer` button was removed; users delete selected delivery history rows with the Delete key.
+- After confirming a delivery, it should not automatically become selected in the delivery workspace.
+- Delivery history delete control, when present during earlier iterations, was moved below `Nouvelle livraison` and reduced in width; current preferred UX is keyboard delete only.
+- Delivery PDF generator was heavily revised:
+  - title should be `FICHE TRACABILITE`,
+  - fixed code/application id should be `CASA FT-01`,
+  - `Date d'application` is fixed to `18/08/2026`,
+  - normal `Date` remains next to the other delivery infos,
+  - hide/remove the `Livraison` option from the PDF UI,
+  - remove `Produits finis confirmes`,
+  - remove bottom-right `Page : 1/1`,
+  - add signature areas `visa client` and `visa R. Q`,
+  - use a compact 4-category table: Beldi, Boulangerie, Patisserie, Viennoiserie,
+  - each category has two subcolumns: `Produit` and `Lot`,
+  - table should use most available page width,
+  - product names should use one fixed readable font size,
+  - lot font size should be large enough to read and should avoid unnecessary ellipses when space remains,
+  - row/cell heights should adapt so all confirmed products fit on one page when possible.
+- Delivery/PDF code is in `src/lib/productionTraceabilityPdf.ts`.
+
+### Reception UX
+
+- `Qte` is a plain numeric text field, not a spinner/counter.
+- Date picker popovers in reception rows must remain fully visible for bottom rows and should match the width of their trigger field.
+- New reception should support selecting all products quickly from category bars when the user wants to deliver/receive all relevant products.
+
+### Form Controls Reference
+
+- A form-control reference audit was done, but no code changes were made.
+- The app is usable without the full accessibility/control refactor.
+- Recommended future approach, only when useful:
+  - improve shared `Field`,
+  - improve `AppCombobox`,
+  - improve `AppDatePicker`,
+  - then migrate busy screens gradually.
+- Do not introduce React Hook Form, Zod, or a new component library unless there is a concrete need.
 
 ## Stack
 
@@ -45,7 +215,7 @@ Common commands:
 npm.cmd run dev
 npm.cmd run build
 npm.cmd run tauri dev
-npm.cmd run tauri build -- --bundles nsis
+npm.cmd run release:build:signed
 ```
 
 ## Important Files
@@ -524,6 +694,7 @@ Table behavior:
 - Table content font size was increased because the user found it too small.
 - Rows should shrink/adapt so the table fits one page when possible.
 - Avoid awkward two-page splits when a single A4 table can reasonably fit.
+- Production PDF lots must be resolved by the unique component node key, never by product ID. Confirmed `production_consumptions` rows override stale snapshot lot arrays; embedded child snapshots are used only when the parent has no direct consumption row for that historical branch.
 - Observation column should be one merged big cell, not separated per component row.
 
 Dynamic columns:
@@ -642,7 +813,7 @@ Before changing accented product/material names:
 
 ## Build and Release Rules
 
-When building a new installer:
+Current normal release flow:
 
 1. Bump version in all relevant files:
    - `package.json`
@@ -650,13 +821,25 @@ When building a new installer:
    - `src-tauri/tauri.conf.json`
    - `src-tauri/Cargo.toml`
    - `src-tauri/Cargo.lock`
-2. Run:
+2. Build signed updater artifacts:
 
 ```powershell
-npm.cmd run tauri build -- --bundles nsis
+npm.cmd run release:build:signed
 ```
 
-3. Confirm the generated installer path and version.
+3. Dry-run the GitHub release publish:
+
+```powershell
+npm.cmd run release:github:dry-run
+```
+
+4. Publish to GitHub Releases:
+
+```powershell
+npm.cmd run release:github
+```
+
+5. Confirm the generated installer path, `.sig`, and `latest.json`.
 
 Known harmless warning:
 
@@ -666,7 +849,7 @@ If the installer appears old:
 
 - Check that all version files were bumped.
 - Check the output folder for the newest timestamp.
-- Make sure the command included `--bundles nsis`.
+- Check that the app updater endpoint still points at GitHub Releases, not Supabase Storage.
 
 ## Git and Protection
 
@@ -731,12 +914,14 @@ When uncertain, ask a focused question. When the request is clear, implement.
 
 ## Recent State Snapshot
 
-At the time this file was last updated:
+This section originally described the old `0.1.30` era. The current top-of-file "Latest Handoff Update" supersedes version/release details here. Keep the historical workflow notes below unless they conflict with the latest update.
 
-- App version: `0.1.30`.
+- App version at latest update: `0.1.55`.
 - Current installer path:
-  `C:\Users\user\myprojects\solution traçabilité\src-tauri\target\release\bundle\nsis\Tracability OS_0.1.30_x64-setup.exe`
-- Current source version expected for the next installer: `0.1.30`.
+  `C:\Users\user\myprojects\solution traçabilité\src-tauri\target\release\bundle\nsis\Tracability OS_0.1.55_x64-setup.exe`
+- Current GitHub release: `https://github.com/irouanegit/tracability-os/releases/tag/app-v0.1.55`.
+- Current installer SHA-256: `0e0efc8e64961fcf37e7cdc968c2a6466e737e3b94f0501986504ad8813f297d`.
+- Current source version expected for the next installer: bump from `0.1.55`.
 - The app uses a custom Node Schema Cherry logo generated from `app-icon.png` (a user-approved design: a green circle with a Y-shaped stem on dark background, representing cherry + schema nodes).
 - All icon sizes were generated via `npm run tauri icon app-icon.png` and placed in `src-tauri/icons/`.
 - `tauri.conf.json` now includes a `"bundle"` section with `"icon"` array and `"targets": ["nsis"]`.
@@ -770,6 +955,8 @@ Recent production behavior included:
 - Substitution semi-fini rows should show a normal clickable product name with a small circled dropdown arrow, not a full-width combobox. Clicking the name should still navigate to that product.
 - Substitution selections must be keyed by the component row/node identity, not only by product id or normalized name. The same substitute family can appear multiple times in one recipe, and changing one row must not change another row.
 - Confirmed batch preview/schema must display the saved confirmed component lots and actual supplier names when available, not just current active schema rows.
+- Selecting a confirmed semi-finished lot must hydrate that lot's saved traceability snapshot recursively. Snapshot drafts are keyed by their unique historical `nodeId`, so repeated raw products in sibling branches (for example `Huile` under both `CROQUANT NOISETTE` and `Praline noisette`) remain independent. Changing one semi-finished lot must never alter another unchanged branch.
+- Production confirmation has a strict consumption boundary: only direct components of the product being confirmed are submitted to `production_consumptions`. Raw materials shown below a selected semi-finished lot are immutable historical provenance from that child batch and must never be revalidated or consumed again by the parent. Migration `037_preserve_semi_finished_batch_lineage.sql` enforces this rule and embeds the selected child batch snapshot into the new parent snapshot.
 
 ### Latest Handoff Update - Planification Audit
 
@@ -778,9 +965,9 @@ The latest planification audit did not find an immediate blocker for manual prod
 - Active runtime is `PlanificationModuleV2` in `src/App.tsx`. The older `PlanificationModule` still exists as legacy compiled code and should not be treated as the current source of truth.
 - Manual production confirmation remains separated from planification. `createProductionWithTraceability` uses `create_production_with_traceability_v3` only when a `planId` is present; ad-hoc production still uses the existing v2/v1 path.
 - `tests/planningEngine.test.ts` currently passes with `npm.cmd run test:planning` (15/15), including same-day planned-time ordering.
-- Critical risk: `supabase/scripts/rebuild_traceability_schema.sql` is still date-only for plan dependency validation. It compares only planned dates and can undo the `planned_time` safeguards if rerun without updating it or reapplying migration 026 afterward.
-- Critical risk: `supabase/scripts/verify_production_planification.sql` is also date-only for invalid dependency checks. It can falsely pass same-day child-after-parent conflicts.
-- `supabase/migrations/026_planification_planned_time.sql` is required for the current workflow and was untracked in the latest `git status`; make sure it is committed before relying on GitHub releases or onboarding another device.
+- `supabase/scripts/rebuild_traceability_schema.sql` includes the planned-time safeguards and the migration 037 direct-consumption/batch-lineage correction. Keep it synchronized with future planification and traceability migrations.
+- `supabase/scripts/verify_production_planification.sql` now verifies date-plus-time dependency ordering, planned-time object readiness, the lineage snapshot function, and direct planned-consumption matching. Keep this verifier synchronized with future migrations.
+- `supabase/migrations/026_planification_planned_time.sql` is required for the current workflow. Make sure it exists in the branch before relying on planification migrations, GitHub releases, or onboarding another device.
 - Source-plan dropdown UX can show a semi-fini source series that is generally valid but incompatible with some generated parent occurrences. Save catches it later; a better future fix is prevalidating each series against the generated schedule and labelling or hiding incompatible series.
 - Raw material lot eligibility is currently date-level, not time-level. This is acceptable only if reception lots are considered available for the whole day. If the business needs reception time ordering, add an `effective_at` timestamp.
 - The current materialized planning horizon is capped at 90 days. Long-term production use needs an extension or refresh strategy.
@@ -827,7 +1014,7 @@ A global registry and lot history viewer for all products and raw materials. Sho
 
 The abandoned localStorage scheduler prototype was removed. Do not reintroduce `src/lib/schedulerEngine.ts`, `src/lib/schedulerResolver.ts`, `RuleEditModal`, `AutomationNotificationBanner`, or `planification.rules` localStorage behavior.
 
-The current Planification workflow is Supabase-backed. Auto-confirmation is performed by the guarded app-level runner in `src/App.tsx`, and the final duplicate protection lives in the database RPC `create_production_with_traceability_v3`.
+The current Planification workflow is Supabase-backed. Auto-confirmation is disabled; the duplicate protection in `create_production_with_traceability_v3` remains important if it is ever reintroduced.
 
 ## Planification (Current Supabase Implementation)
 
@@ -835,18 +1022,21 @@ View ID: `"planification"`.
 
 Primary files:
 
-- `src/App.tsx`: `PlanificationModule`, integration with the existing Production Confirm Lots workflow, and the guarded app-level auto-confirm runner.
+- `src/App.tsx`: `PlanificationModuleV2` and integration with the existing Production Confirm Lots workflow. It has no active auto-confirm runner as of `0.1.55`.
 - `src/lib/planningEngine.ts`: recurrence expansion and date+time child-occurrence matching.
+- `src/lib/productionConsumptionBoundary.ts`: keeps nested child-batch provenance out of new parent consumptions.
 - `src/lib/traceabilityApi.ts`: plan, dependency, lot, confirmation-context, cancellation, and refresh API helpers.
 - `supabase/migrations/020_production_planification.sql`: database schema, validation, RLS, derived statuses, and RPCs.
 - `supabase/migrations/026_planification_planned_time.sql`: adds `planned_time`, time-aware dependency validation, and updated plan RPC/view contracts.
+- `supabase/migrations/037_preserve_semi_finished_batch_lineage.sql`: direct-consumption validation and recursive selected-batch lineage preservation for manual and planned confirmation.
 - `supabase/scripts/verify_production_planification.sql`: read-only post-migration verification.
 - `tests/planningEngine.test.ts`: focused recurrence and date+time dependency tests.
+- `tests/productionConsumptionBoundary.test.ts`: focused direct-component submission and nested-provenance exclusion tests.
 
 ### Core Workflow
 
 - Planning stores `planned_date` plus `planned_time`. The time is used to keep same-day parent/child production order correct, for example a finished product at 08:00 must not consume a semi-finished product planned for 10:00 that same day.
-- Due active plans can be auto-confirmed when the app is open, authenticated, and connected. The runner checks immediately and then on a short interval, processes only ready/overdue planned occurrences whose planned date/time is due, requires every reserved lot selection to exist, and sends the confirmation through `create_production_with_traceability_v3`.
+- Due active plans are not auto-confirmed as of `0.1.55`. A user can still manually open a ready/overdue planned occurrence in the existing Production Confirm Lots screen, with the planned date/time and reserved selections preloaded.
 - Manual confirmation remains supported and must not depend on Planification.
 - A finished or semi-finished product can be planned only when it has an active recipe.
 - Every mandatory raw-material dependency must have a concrete eligible lot for the planned date. `Eau` is the only no-lot exception.
@@ -904,9 +1094,9 @@ The creation flow expands the full recipe tree, lets each semi-finished dependen
 
 ### Deployment
 
-Run the complete `supabase/migrations/020_production_planification.sql` migration once after migration 019, then run `supabase/migrations/026_planification_planned_time.sql`, then run `supabase/scripts/verify_production_planification.sql`.
+Run the complete `supabase/migrations/020_production_planification.sql` migration once after migration 019, then run `supabase/migrations/026_planification_planned_time.sql`, then run `supabase/migrations/037_preserve_semi_finished_batch_lineage.sql`, and finally run `supabase/scripts/verify_production_planification.sql`.
 The migrations are not executed merely by building the desktop app; they must be applied to the Supabase project separately.
-Important: as of the latest audit, the verification script still needs a planned-time update. Do not treat it as proof that same-day ordering is safe until it compares `planned_date` plus `planned_time`.
+The verifier is now time-aware and checks the direct-consumption/lineage functions. A successful desktop update alone is not proof that the backend is ready; the migration and verifier must also succeed in Supabase.
 
 ## Production PDF Fixes (This Session)
 
@@ -927,6 +1117,10 @@ Important: as of the latest audit, the verification script still needs a planned
 ### Empty Semi-Finished Cell Merging
 
 When a semi-finished product contains only raw materials (no nested semi-finished), the empty semi-finished cells in the PDF table are merged into a single grouped empty cell rather than showing individual empty cells for each row.
+
+### Exact Confirmed Lot Resolution
+
+Production PDF generation now keys both live drafts and saved confirmations by their unique component node path. For saved production PDFs, actual confirmed consumption rows take precedence over snapshot lot arrays, preventing repeated materials in sibling semi-finished branches from borrowing each other's lots.
 
 ## Reception PDF Fixes (This Session)
 
@@ -979,20 +1173,32 @@ The fix was adding to `tauri.conf.json`:
 
 ## Build and Release Rules
 
-When building a new installer:
+When building a new updater package/installer:
 
-1. Bump version in all three files (must be in sync):
+1. Bump version in all three app version files first:
    - `package.json` (`"version"`)
    - `src-tauri/tauri.conf.json` (`"version"`)
    - `src-tauri/Cargo.toml` (`[package] version`)
-2. Run:
+2. Build the signed installer and updater artifacts:
 
 ```powershell
-npx.cmd tauri build
+npm.cmd run release:build:signed
 ```
 
-3. Confirm the generated installer path and version.
-4. The `"bundle"` section in `tauri.conf.json` with `"targets": ["nsis"]` and `"icon"` array handles NSIS bundling and custom icon embedding automatically. No need for `-- --bundles nsis` flag when the config specifies it.
+3. Dry-run the GitHub publish:
+
+```powershell
+npm.cmd run release:github:dry-run
+```
+
+4. Publish the release:
+
+```powershell
+npm.cmd run release:github
+```
+
+5. Confirm the generated installer path, version, `.sig`, and GitHub `latest.json`.
+6. The `"bundle"` section in `tauri.conf.json` with `"targets": ["nsis"]`, `"createUpdaterArtifacts": true`, and `"icon"` array handles NSIS bundling, updater artifacts, and custom icon embedding automatically.
 
 Note: `package-lock.json` and `src-tauri/Cargo.lock` update automatically during the build process.
 
@@ -1037,6 +1243,7 @@ Scripts mentioned frequently:
 - `supabase/migrations/026_planification_planned_time.sql`
 - `supabase/migrations/027_production_consumption_supplier_name.sql`
 - `supabase/migrations/028_repair_production_detail_snapshot_sources.sql`
+- `supabase/migrations/037_preserve_semi_finished_batch_lineage.sql`
 
 When the user gets SQL errors like:
 
@@ -1121,10 +1328,9 @@ Before release builds:
 - Do not block confirmation only because the same product/date already exists.
 - Do not block confirmation because `Eau` has no lot.
 - Do not reconnect the old localStorage scheduler prototype. Planification is now the Supabase-backed workflow.
-- Do not let Planification auto-confirm the same plan more than once or spam repeated confirmations. Auto-confirmation must stay guarded by the client runner and the `create_production_with_traceability_v3` database lock/check.
+- Do not re-enable Planification auto-confirmation without an explicit request and a low-egress scheduling design. If restored, it must retain the `create_production_with_traceability_v3` database lock/check and must not use a per-device 15-second polling loop.
 - Do not remove `planned_time` from Planification; it protects same-day semi-fini/fini chronological order.
-- Do not run `supabase/scripts/rebuild_traceability_schema.sql` for planification repair unless it includes the migration 026 `planned_time` logic or migration 026 is reapplied immediately afterward.
-- Do not trust the current `supabase/scripts/verify_production_planification.sql` for same-day time conflicts until it compares planned date plus planned time.
+- Keep `supabase/scripts/rebuild_traceability_schema.sql` aligned with migration 026 planned-time logic and migration 037 direct-consumption lineage logic.
 - Do not let Planification changes break the manual Production Confirm Lots workflow.
 - Do not key production substitution selections only by product id/name. Use the component row/node identity so repeated substitution groups can be changed independently.
 - Do not add "livraison(s)" or "confirmation(s)" text next to counts in the Lots & Traçabilité table.

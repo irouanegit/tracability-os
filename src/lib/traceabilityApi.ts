@@ -1,5 +1,9 @@
 import { supabase } from "./supabase";
 import { formatFrenchDate, formatFrenchDateTime } from "./dateFormat";
+import {
+  embedProductionSnapshotLineage,
+  findMissingProductionSnapshotLineage,
+} from "./productionSnapshotLineage";
 
 export type ProductType = "raw" | "semi_finished" | "finished";
 export type ProductCategory = "beldi" | "boulangerie" | "cake" | "patisserie" | "viennoiserie";
@@ -35,6 +39,7 @@ export type LotStockPreview = {
 
 export type ProductSchemaNode = Product & {
   stock: LotStockPreview | null;
+  traceabilityNodeId?: string;
   children: ProductSchemaNode[];
 };
 
@@ -310,6 +315,7 @@ export type ProductionTraceabilityLot = {
   supplierLot: string | null;
   supplierName?: string | null;
   sourceType: "reception" | "fabrication";
+  sourceId?: string | null;
   lotCreatedAt: string;
   productId?: string;
   productName?: string;
@@ -367,6 +373,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function shiftInputDate(value: string, days: number) {
+  const date = new Date(`${value}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 export type AvailableLotOption = {
   id: string;
   productId: string;
@@ -379,6 +391,7 @@ export type AvailableLotOption = {
   sourceType: "reception" | "fabrication";
   sourceId: string | null;
   createdAt: string;
+  availableAt: string;
   responsibleName: string | null;
 };
 
@@ -438,6 +451,52 @@ export type ProductionPlan = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type ProductionPlanAutoConfirmCandidate = Pick<
+  ProductionPlan,
+  "id" | "planName" | "productId" | "productName" | "plannedDate" | "plannedTime"
+>;
+
+export type ProductionPlanCalendarEntry = Pick<
+  ProductionPlan,
+  | "id"
+  | "seriesStatus"
+  | "planName"
+  | "productName"
+  | "productType"
+  | "plannedDate"
+  | "plannedTime"
+  | "productionBatchId"
+  | "storedStatus"
+  | "derivedStatus"
+>;
+
+export type ProductionCalendarBatch = Pick<
+  ProductionBatch,
+  | "id"
+  | "planId"
+  | "productionDate"
+  | "productName"
+  | "productType"
+  | "generatedLot"
+  | "responsibleName"
+  | "status"
+  | "confirmedBy"
+  | "confirmedAt"
+  | "createdAt"
+>;
+
+export type ReceptionCalendarBatch = Pick<
+  ReceptionBatch,
+  | "id"
+  | "batchNumber"
+  | "receptionDate"
+  | "supplierName"
+  | "status"
+  | "articleCount"
+  | "quantitySummary"
+  | "validatedAt"
+>;
 
 export type ProductionPlanDependency = {
   id: string;
@@ -536,6 +595,9 @@ export type ProductionPlanConfirmationContext = {
   responsibleName: string | null;
   status: ProductionPlanDerivedStatus;
   selections: Array<{
+    nodeKey: string;
+    parentNodeKey: string | null;
+    depth: number;
     expectedProductId: string;
     selectedProductId: string;
     lotId: string | null;
@@ -732,8 +794,21 @@ export async function fetchLotStockPreview(productIds?: string[]): Promise<Recor
   return stockByProductId;
 }
 
+const globalProductSchemaCache = new Map<string, ProductSchemaNode[]>();
+
+export function clearProductSchemaCache(productId?: string) {
+  if (productId) {
+    globalProductSchemaCache.delete(productId);
+  } else {
+    globalProductSchemaCache.clear();
+  }
+}
+
 export async function fetchProductSchema(productId: string): Promise<ProductSchemaNode[]> {
   if (!supabase || !productId) return [];
+  if (globalProductSchemaCache.has(productId)) {
+    return globalProductSchemaCache.get(productId)!;
+  }
 
   const rows = await fetchProductSchemaTreeRows(productId);
   const stockByProductId = await fetchLotStockPreview([...new Set(rows.map((row) => row.component_product_id))]);
@@ -782,7 +857,9 @@ export async function fetchProductSchema(productId: string): Promise<ProductSche
     });
   }
 
-  return buildChildren(productId, new Set([productId]));
+  const result = buildChildren(productId, new Set([productId]));
+  globalProductSchemaCache.set(productId, result);
+  return result;
 }
 
 type ProductSchemaComponentRow = {
@@ -1075,6 +1152,7 @@ export async function saveProductSchema(
   },
 ) {
   if (!supabase) throw new Error("Supabase is not configured.");
+  clearProductSchemaCache(targetProductId);
 
   const { error } = await supabase.rpc("save_product_schema", {
     p_target_product_id: targetProductId,
@@ -1174,17 +1252,35 @@ export async function fetchRecentReceptions(limit = 20): Promise<RecentReception
   }));
 }
 
-export async function fetchReceptionBatches(limit = 50): Promise<ReceptionBatch[]> {
+export async function fetchReceptionBatches(): Promise<ReceptionBatch[]> {
   if (!supabase) return [];
 
   const baseColumns = "id, batch_number, reception_date, supplier_id, supplier_name, status, observations, article_count, quantity_summary";
   const auditColumns =
     "validated_by, validated_at, validated_by_name, validated_by_email, updated_by, updated_at, updated_by_name, updated_by_email";
   const exportColumns = "exported_by, exported_at, exported_by_name, exported_by_email";
-  const query = await supabase
-    .from("reception_batch_history")
-    .select(`${baseColumns}, ${auditColumns}, ${exportColumns}`)
-    .limit(limit);
+  const pageSize = 1000;
+
+  async function fetchAllRows(columns: string) {
+    const rows: Array<Record<string, any>> = [];
+
+    for (let from = 0; ; from += pageSize) {
+      const page = await supabase!
+        .from("reception_batch_history")
+        .select(columns)
+        .order("reception_date", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, from + pageSize - 1);
+
+      if (page.error) return { data: null, error: page.error };
+
+      const pageRows = (page.data ?? []) as Array<Record<string, any>>;
+      rows.push(...pageRows);
+      if (pageRows.length < pageSize) return { data: rows, error: null };
+    }
+  }
+
+  const query = await fetchAllRows(`${baseColumns}, ${auditColumns}, ${exportColumns}`);
   let data = (query.data ?? null) as Array<Record<string, any>> | null;
   let error = query.error;
 
@@ -1196,7 +1292,7 @@ export async function fetchReceptionBatches(limit = 50): Promise<ReceptionBatch[
       error.message.includes("exported_by") ||
       error.message.includes("exported_at"))
   ) {
-    const fallback = await supabase.from("reception_batch_history").select(baseColumns).limit(limit);
+    const fallback = await fetchAllRows(baseColumns);
     data = fallback.data;
     error = fallback.error;
   }
@@ -1219,6 +1315,57 @@ export async function fetchReceptionBatches(limit = 50): Promise<ReceptionBatch[
     updatedAt: "updated_at" in row ? row.updated_at : null,
     exportedBy: mapAuditActor(row, "exported_by", "exported_by_name", "exported_by_email"),
     exportedAt: "exported_at" in row ? row.exported_at : null,
+  }));
+}
+
+export async function fetchReceptionCalendarBatches(startDate: string, endDate: string): Promise<ReceptionCalendarBatch[]> {
+  if (!supabase || !startDate || !endDate) return [];
+
+  const baseColumns = "id, batch_number, reception_date, supplier_name, status, article_count, quantity_summary";
+  const pageSize = 1000;
+  const rangeStart = `${shiftInputDate(startDate, -1)}T00:00:00Z`;
+  const rangeEnd = `${shiftInputDate(endDate, 2)}T00:00:00Z`;
+
+  async function fetchAllRows(columns: string) {
+    const rows: Array<Record<string, any>> = [];
+    for (let from = 0; ; from += pageSize) {
+      const page = await supabase!
+        .from("reception_batch_history")
+        .select(columns)
+        .gte("reception_date", rangeStart)
+        .lt("reception_date", rangeEnd)
+        .order("reception_date")
+        .order("id")
+        .range(from, from + pageSize - 1);
+      if (page.error) return { data: null, error: page.error };
+
+      const pageRows = (page.data ?? []) as Array<Record<string, any>>;
+      rows.push(...pageRows);
+      if (pageRows.length < pageSize) return { data: rows, error: null };
+    }
+  }
+
+  const query = await fetchAllRows(`${baseColumns}, validated_at`);
+  let data = query.data;
+  let error = query.error;
+
+  if (error && (error.code === "42703" || error.code === "PGRST204" || error.message.includes("validated_at"))) {
+    const fallback = await fetchAllRows(baseColumns);
+    data = fallback.data;
+    error = fallback.error;
+  }
+
+  if (error) throw error;
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    batchNumber: row.batch_number,
+    receptionDate: row.reception_date,
+    supplierName: row.supplier_name,
+    status: row.status,
+    articleCount: Number(row.article_count ?? 0),
+    quantitySummary: row.quantity_summary ?? "--",
+    validatedAt: "validated_at" in row ? row.validated_at : null,
   }));
 }
 
@@ -1307,6 +1454,73 @@ export async function fetchProductionBatches(): Promise<ProductionBatch[]> {
     updatedAt: "updated_at" in row ? row.updated_at : null,
     exportedBy: mapAuditActor(row, "exported_by", "exported_by_name", "exported_by_email"),
     exportedAt: "exported_at" in row ? row.exported_at : null,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function fetchProductionCalendarBatches(startDate: string, endDate: string): Promise<ProductionCalendarBatch[]> {
+  if (!supabase || !startDate || !endDate) return [];
+
+  const baseColumns =
+    "id, plan_id, production_date, product_name, product_type, generated_lot, responsible_name, status, created_at";
+  const auditColumns = "confirmed_by, confirmed_at, confirmed_by_name, confirmed_by_email";
+  const pageSize = 1000;
+  const rangeStart = `${shiftInputDate(startDate, -1)}T00:00:00Z`;
+  const rangeEnd = `${shiftInputDate(endDate, 2)}T00:00:00Z`;
+
+  async function fetchAllRows(columns: string) {
+    const rows: Array<Record<string, any>> = [];
+    for (let from = 0; ; from += pageSize) {
+      const page = await supabase!
+        .from("production_batch_history")
+        .select(columns)
+        .gte("production_date", rangeStart)
+        .lt("production_date", rangeEnd)
+        .order("production_date")
+        .order("id")
+        .range(from, from + pageSize - 1);
+      if (page.error) return { data: null, error: page.error };
+
+      const pageRows = (page.data ?? []) as Array<Record<string, any>>;
+      rows.push(...pageRows);
+      if (pageRows.length < pageSize) return { data: rows, error: null };
+    }
+  }
+
+  const query = await fetchAllRows(`${baseColumns}, ${auditColumns}`);
+  let data = query.data;
+  let error = query.error;
+
+  if (
+    error &&
+    (error.code === "42703" ||
+      error.code === "PGRST204" ||
+      error.message.includes("plan_id") ||
+      error.message.includes("confirmed_by"))
+  ) {
+    const fallback = await fetchAllRows(
+      "id, production_date, product_name, product_type, generated_lot, responsible_name, status, created_at",
+    );
+    data = fallback.data;
+    error = fallback.error;
+  }
+
+  if (error) {
+    if (error.code === "PGRST205" || error.message.includes("production_batch_history")) return [];
+    throw error;
+  }
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    planId: "plan_id" in row ? row.plan_id : null,
+    productionDate: row.production_date,
+    productName: row.product_name,
+    productType: row.product_type,
+    generatedLot: row.generated_lot,
+    responsibleName: row.responsible_name,
+    status: row.status,
+    confirmedBy: mapAuditActor(row, "confirmed_by", "confirmed_by_name", "confirmed_by_email"),
+    confirmedAt: "confirmed_at" in row ? row.confirmed_at : null,
     createdAt: row.created_at,
   }));
 }
@@ -1663,17 +1877,27 @@ function mapProductionConsumptionDetailRow(row: any): ProductionConsumptionDetai
   };
 }
 
-export async function fetchAvailableLotsForProduct(productId: string, limit = 5): Promise<AvailableLotOption[]> {
-  if (!supabase || !productId) return [];
+export async function fetchAvailableLotsForProducts(
+  productIds: string[],
+  limit = 5,
+  asOfDate?: string,
+): Promise<Record<string, AvailableLotOption[]>> {
+  if (!supabase || productIds.length === 0) return {};
 
+  const uniqueProductIds = [...new Set(productIds.filter(Boolean))];
+  if (uniqueProductIds.length === 0) return {};
+
+  const fetchLimit = asOfDate ? Math.max(limit * 6, 30) : limit;
   const { data, error } = await supabase
     .from("lots")
-    .select("id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, supplier:suppliers(name), product:products(name, type, category)")
-    .eq("product_id", productId)
+    .select(
+      "id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, supplier:suppliers(name), product:products(name, type, category)",
+    )
+    .in("product_id", uniqueProductIds)
     .eq("lot_status", "available")
     .eq("quality_status", "conforme")
     .order("created_at", { ascending: false })
-    .limit(limit);
+    .limit(fetchLimit * uniqueProductIds.length);
 
   if (error) throw error;
 
@@ -1684,41 +1908,142 @@ export async function fetchAvailableLotsForProduct(productId: string, limit = 5)
         .map((row) => row.source_id as string),
     ),
   ];
-  const responsibleNameByBatchId = new Map<string, string | null>();
+  const receptionIds = [
+    ...new Set(
+      (data ?? [])
+        .filter((row) => row.source_type === "reception" && row.source_id)
+        .map((row) => row.source_id as string),
+    ),
+  ];
 
-  if (fabricationBatchIds.length > 0) {
-    const { data: batchRows, error: batchError } = await supabase
-      .from("production_batches")
-      .select("id, responsible_name")
-      .in("id", fabricationBatchIds);
+  const [receptionResult, batchResult] = await Promise.all([
+    receptionIds.length > 0
+      ? supabase.from("raw_material_receptions").select("id, reception_date").in("id", receptionIds)
+      : Promise.resolve({ data: [] as any[], error: null }),
+    fabricationBatchIds.length > 0
+      ? supabase.from("production_batches").select("id, production_date, responsible_name").in("id", fabricationBatchIds)
+      : Promise.resolve({ data: [] as any[], error: null }),
+  ]);
 
-    if (batchError) throw batchError;
+  if (receptionResult.error) throw receptionResult.error;
+  if (batchResult.error) throw batchResult.error;
 
-    (batchRows ?? []).forEach((row) => {
-      responsibleNameByBatchId.set(row.id, row.responsible_name ?? null);
+  const receptionDateById = new Map<string, string>();
+  (receptionResult.data ?? []).forEach((row: { id: string; reception_date: string | null }) => {
+    if (row.reception_date) receptionDateById.set(row.id, row.reception_date);
+  });
+
+  const productionDetailsByBatchId = new Map<string, { productionDate: string | null; responsibleName: string | null }>();
+  (batchResult.data ?? []).forEach((row: { id: string; production_date: string | null; responsible_name: string | null }) => {
+    productionDetailsByBatchId.set(row.id, {
+      productionDate: row.production_date ?? null,
+      responsibleName: row.responsible_name ?? null,
     });
+  });
+
+  const asOfDateKey = toDateKey(asOfDate);
+  const lotsByProductId: Record<string, AvailableLotOption[]> = {};
+  for (const id of uniqueProductIds) {
+    lotsByProductId[id] = [];
   }
 
-  return (data ?? []).map((row) => ({
-    id: row.id,
-    productId: row.product_id,
-    productName: extractJoinedProductField(row.product, "name"),
-    productType: extractJoinedProductType(row.product),
-    productCategory: extractJoinedProductCategory(row.product),
-    lotNumber: row.lot_number,
-    supplierLot: row.supplier_lot,
-    supplierName: extractJoinedSupplierName(row.supplier),
-    sourceType: row.source_type,
-    sourceId: row.source_id,
-    createdAt: row.created_at,
-    responsibleName:
-      row.source_type === "fabrication" && row.source_id
-        ? responsibleNameByBatchId.get(row.source_id) ?? null
-        : null,
-  }));
+  (data ?? []).forEach((row) => {
+    const productionDetails = row.source_type === "fabrication" && row.source_id ? productionDetailsByBatchId.get(row.source_id) : null;
+    const receptionDate = row.source_type === "reception" && row.source_id ? receptionDateById.get(row.source_id) : null;
+    const availableAt = productionDetails?.productionDate ?? receptionDate ?? row.created_at;
+
+    const lotDateKey = toDateKey(availableAt);
+    if (asOfDateKey && lotDateKey && lotDateKey > asOfDateKey) {
+      return;
+    }
+
+    const lot: AvailableLotOption = {
+      id: row.id,
+      productId: row.product_id,
+      productName: extractJoinedProductField(row.product, "name"),
+      productType: extractJoinedProductType(row.product),
+      productCategory: extractJoinedProductCategory(row.product),
+      lotNumber: row.lot_number,
+      supplierLot: row.supplier_lot,
+      supplierName: extractJoinedSupplierName(row.supplier),
+      sourceType: row.source_type,
+      sourceId: row.source_id,
+      createdAt: row.created_at,
+      availableAt,
+      responsibleName: productionDetails?.responsibleName ?? null,
+    };
+
+    if (!lotsByProductId[row.product_id]) lotsByProductId[row.product_id] = [];
+    lotsByProductId[row.product_id].push(lot);
+  });
+
+  for (const id of uniqueProductIds) {
+    lotsByProductId[id].sort((left, right) => {
+      const rightDate = toDateKey(right.availableAt) || toDateKey(right.createdAt);
+      const leftDate = toDateKey(left.availableAt) || toDateKey(left.createdAt);
+      return rightDate.localeCompare(leftDate) || right.createdAt.localeCompare(left.createdAt);
+    });
+    lotsByProductId[id] = lotsByProductId[id].slice(0, limit);
+  }
+
+  return lotsByProductId;
+}
+
+export async function fetchAvailableLotsForProduct(productId: string, limit = 5, asOfDate?: string): Promise<AvailableLotOption[]> {
+  const result = await fetchAvailableLotsForProducts([productId], limit, asOfDate);
+  return result[productId] ?? [];
+}
+
+const globalTraceabilitySnapshotCache = new Map<string, Promise<ProductionTraceabilitySnapshot | null>>();
+
+export function clearProductionSnapshotCache() {
+  globalTraceabilitySnapshotCache.clear();
 }
 
 export async function fetchProductionTraceabilitySnapshot(batchId: string): Promise<ProductionTraceabilitySnapshot | null> {
+  const cached = globalTraceabilitySnapshotCache.get(batchId);
+  if (cached) return cached;
+
+  const request = fetchProductionTraceabilitySnapshotWithLineage(batchId, globalTraceabilitySnapshotCache, new Set());
+  globalTraceabilitySnapshotCache.set(batchId, request);
+  return request;
+}
+
+async function fetchProductionTraceabilitySnapshotWithLineage(
+  batchId: string,
+  cache: Map<string, Promise<ProductionTraceabilitySnapshot | null>>,
+  ancestorBatchIds: Set<string>,
+): Promise<ProductionTraceabilitySnapshot | null> {
+  if (!supabase || !batchId) return null;
+  if (ancestorBatchIds.has(batchId)) return null;
+
+  const cached = cache.get(batchId);
+  if (cached) return cached;
+
+  const nextAncestors = new Set(ancestorBatchIds).add(batchId);
+  const request = loadProductionTraceabilitySnapshot(batchId).then(async (snapshot) => {
+    let hydratedSnapshot = await hydrateProductionTraceabilitySnapshotSuppliers(snapshot);
+    if (!hydratedSnapshot) return null;
+
+    const missingLineages = findMissingProductionSnapshotLineage(hydratedSnapshot);
+    for (const lineage of missingLineages) {
+      const childSnapshot = await fetchProductionTraceabilitySnapshotWithLineage(
+        lineage.sourceBatchId,
+        cache,
+        nextAncestors,
+      );
+      if (childSnapshot) {
+        hydratedSnapshot = embedProductionSnapshotLineage(hydratedSnapshot, lineage, childSnapshot);
+      }
+    }
+
+    return hydratedSnapshot;
+  });
+  cache.set(batchId, request);
+  return request;
+}
+
+async function loadProductionTraceabilitySnapshot(batchId: string): Promise<ProductionTraceabilitySnapshot | null> {
   if (!supabase || !batchId) return null;
 
   const { data, error } = await supabase
@@ -1728,41 +2053,65 @@ export async function fetchProductionTraceabilitySnapshot(batchId: string): Prom
     .maybeSingle();
   if (error) throw error;
 
-  return hydrateProductionTraceabilitySnapshotSuppliers(parseProductionTraceabilitySnapshot(data?.traceability_snapshot));
+  const storedSnapshot = parseProductionTraceabilitySnapshot(data?.traceability_snapshot);
+  if (storedSnapshot) return storedSnapshot;
+
+  let rebuiltSnapshotResponse = await supabase.rpc("build_production_traceability_snapshot_with_batch_lineage", {
+    p_batch_id: batchId,
+  });
+  if (
+    rebuiltSnapshotResponse.error?.code === "PGRST202" ||
+    rebuiltSnapshotResponse.error?.message.includes("build_production_traceability_snapshot_with_batch_lineage")
+  ) {
+    rebuiltSnapshotResponse = await supabase.rpc("build_production_traceability_snapshot", { p_batch_id: batchId });
+  }
+  if (rebuiltSnapshotResponse.error) throw rebuiltSnapshotResponse.error;
+  return parseProductionTraceabilitySnapshot(rebuiltSnapshotResponse.data);
 }
 
 async function hydrateProductionTraceabilitySnapshotSuppliers(snapshot: ProductionTraceabilitySnapshot | null) {
   if (!supabase || !snapshot) return snapshot;
 
-  const missingSupplierLotIds = [
+  const lotIdsToHydrate = [
     ...new Set(
       snapshot.components
         .flatMap((component) => component.lots)
-        .filter((lot) => lot.sourceType === "reception" && lot.lotId && !lot.supplierName)
+        .filter(
+          (lot) =>
+            lot.lotId &&
+            ((lot.sourceType === "reception" && !lot.supplierName) ||
+              (lot.sourceType === "fabrication" && !lot.sourceId)),
+        )
         .map((lot) => lot.lotId),
     ),
   ];
 
-  if (missingSupplierLotIds.length === 0) return snapshot;
+  if (lotIdsToHydrate.length === 0) return snapshot;
 
   const { data, error } = await supabase
     .from("lots")
-    .select("id, supplier:suppliers(name)")
-    .in("id", missingSupplierLotIds);
+    .select("id, source_id, supplier:suppliers(name)")
+    .in("id", lotIdsToHydrate);
 
   if (error) {
     console.warn("Production traceability snapshot supplier hydration failed", error);
     return snapshot;
   }
 
-  const supplierByLotId = new Map((data ?? []).map((row) => [row.id, extractJoinedSupplierName(row.supplier)]));
+  const lotSourceById = new Map(
+    (data ?? []).map((row) => [
+      row.id,
+      { sourceId: row.source_id ?? null, supplierName: extractJoinedSupplierName(row.supplier) },
+    ]),
+  );
   return {
     ...snapshot,
     components: snapshot.components.map((component) => ({
       ...component,
       lots: component.lots.map((lot) => ({
         ...lot,
-        supplierName: lot.supplierName ?? supplierByLotId.get(lot.lotId) ?? null,
+        sourceId: lot.sourceId ?? lotSourceById.get(lot.lotId)?.sourceId ?? null,
+        supplierName: lot.supplierName ?? lotSourceById.get(lot.lotId)?.supplierName ?? null,
       })),
     })),
   };
@@ -1777,6 +2126,7 @@ export type ProductLotHistoryItem = {
   sourceType: "reception" | "fabrication";
   sourceId: string | null;
   createdAt: string;
+  effectiveAt: string | null;
   actor: AuditActor;
 };
 
@@ -1790,8 +2140,62 @@ function mapProductLotHistoryRow(row: Record<string, any>, includeActor: boolean
     sourceType: row.source_type,
     sourceId: row.source_id,
     createdAt: row.created_at,
+    effectiveAt: null,
     actor: includeActor ? mapAuditActor(row, "created_by", "created_by_name", "created_by_email") : emptyAuditActor,
   };
+}
+
+async function hydrateProductLotHistoryEffectiveDates(items: ProductLotHistoryItem[]) {
+  if (!supabase || items.length === 0) return items;
+
+  const receptionIds = [
+    ...new Set(items.filter((item) => item.sourceType === "reception" && item.sourceId).map((item) => item.sourceId!)),
+  ];
+  const fabricationIds = [
+    ...new Set(items.filter((item) => item.sourceType === "fabrication" && item.sourceId).map((item) => item.sourceId!)),
+  ];
+  const effectiveDateBySource = new Map<string, string>();
+  const sourceChunkSize = 100;
+
+  for (let index = 0; index < receptionIds.length; index += sourceChunkSize) {
+    const { data, error } = await supabase
+      .from("raw_material_receptions")
+      .select("id, reception_date")
+      .in("id", receptionIds.slice(index, index + sourceChunkSize));
+    if (error) {
+      console.warn("Reception lot business-date hydration failed", error);
+      continue;
+    }
+    (data ?? []).forEach((row) => {
+      if (row.reception_date) effectiveDateBySource.set(`reception:${row.id}`, row.reception_date);
+    });
+  }
+
+  for (let index = 0; index < fabricationIds.length; index += sourceChunkSize) {
+    const { data, error } = await supabase
+      .from("production_batches")
+      .select("id, production_date")
+      .in("id", fabricationIds.slice(index, index + sourceChunkSize));
+    if (error) {
+      console.warn("Production lot business-date hydration failed", error);
+      continue;
+    }
+    (data ?? []).forEach((row) => {
+      if (row.production_date) effectiveDateBySource.set(`fabrication:${row.id}`, row.production_date);
+    });
+  }
+
+  return items.map((item) => ({
+    ...item,
+    effectiveAt: item.sourceId ? effectiveDateBySource.get(`${item.sourceType}:${item.sourceId}`) ?? null : null,
+  }));
+}
+
+function sortProductLotHistoryByEffectiveDate(items: ProductLotHistoryItem[]) {
+  return [...items].sort((left, right) => {
+    const dateComparison = (right.effectiveAt ?? "").localeCompare(left.effectiveAt ?? "");
+    return dateComparison || right.createdAt.localeCompare(left.createdAt);
+  });
 }
 
 export async function fetchLotHistoryForProduct(productId: string, limit = 50): Promise<ProductLotHistoryItem[]> {
@@ -1813,10 +2217,16 @@ export async function fetchLotHistoryForProduct(productId: string, limit = 50): 
       .limit(limit);
 
     if (fallback.error) return [];
-    return (fallback.data ?? []).map((row) => mapProductLotHistoryRow(row, false));
+    const hydrated = await hydrateProductLotHistoryEffectiveDates(
+      (fallback.data ?? []).map((row) => mapProductLotHistoryRow(row, false)),
+    );
+    return sortProductLotHistoryByEffectiveDate(hydrated);
   }
 
-  return (data ?? []).map((row) => mapProductLotHistoryRow(row, true));
+  const hydrated = await hydrateProductLotHistoryEffectiveDates(
+    (data ?? []).map((row) => mapProductLotHistoryRow(row, true)),
+  );
+  return sortProductLotHistoryByEffectiveDate(hydrated);
 }
 
 export async function fetchLotHistoryForProducts(productIds: string[], perProductLimit = 50): Promise<Record<string, ProductLotHistoryItem[]>> {
@@ -1850,12 +2260,18 @@ export async function fetchLotHistoryForProducts(productIds: string[], perProduc
 
     if (query.error) throw query.error;
 
-    for (const row of query.data ?? []) {
-      const productId = row.product_id;
-      if (!lotsByProductId[productId] || lotsByProductId[productId].length >= perProductLimit) continue;
-      lotsByProductId[productId].push(mapProductLotHistoryRow(row, includeActor));
+    const hydratedRows = await hydrateProductLotHistoryEffectiveDates(
+      (query.data ?? []).map((row: Record<string, any>) => mapProductLotHistoryRow(row, includeActor)),
+    );
+    for (const lot of hydratedRows) {
+      if (!lotsByProductId[lot.productId]) continue;
+      lotsByProductId[lot.productId].push(lot);
     }
   }
+
+  Object.keys(lotsByProductId).forEach((productId) => {
+    lotsByProductId[productId] = sortProductLotHistoryByEffectiveDate(lotsByProductId[productId]).slice(0, perProductLimit);
+  });
 
   return lotsByProductId;
 }
@@ -1965,6 +2381,105 @@ export async function fetchProductionPlans(): Promise<ProductionPlan[]> {
     createdBy: mapAuditActor(row, "created_by", "created_by_name", "created_by_email"),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }));
+}
+
+export async function fetchDueProductionPlans(
+  currentDate: string,
+  currentTime: string,
+  limit = 5,
+): Promise<ProductionPlanAutoConfirmCandidate[]> {
+  if (!supabase || !currentDate || limit < 1) return [];
+
+  const { data: seriesRows, error: seriesError } = await supabase
+    .from("production_plan_series")
+    .select("id")
+    .eq("status", "active");
+
+  if (seriesError) throw seriesError;
+
+  const activeSeriesIds = (seriesRows ?? []).map((row) => row.id).filter(Boolean);
+  if (activeSeriesIds.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("production_plan_overview")
+    .select("id, plan_name, product_id, product_name, planned_date, planned_time")
+    .in("series_id", activeSeriesIds)
+    .eq("stored_status", "planned")
+    .is("production_batch_id", null)
+    .in("derived_status", ["ready", "overdue"])
+    .lte("planned_date", currentDate)
+    .order("planned_date")
+    .order("planned_time")
+    .limit(limit);
+
+  if (error) throw error;
+
+  return (data ?? [])
+    .map((row) => ({
+      id: row.id,
+      planName: row.plan_name || row.product_name,
+      productId: row.product_id,
+      productName: row.product_name,
+      plannedDate: row.planned_date,
+      plannedTime: row.planned_time ?? "06:30:00",
+    }))
+    .filter((plan) => `${plan.plannedDate}T${plan.plannedTime}` <= `${currentDate}T${currentTime}`)
+    .slice(0, limit);
+}
+
+export async function fetchProductionPlanCalendarEntries(
+  startDate: string,
+  endDate: string,
+): Promise<ProductionPlanCalendarEntry[]> {
+  if (!supabase || !startDate || !endDate) return [];
+
+  const { data: seriesRows, error: seriesError } = await supabase
+    .from("production_plan_series")
+    .select("id")
+    .eq("status", "active");
+
+  if (seriesError) throw seriesError;
+
+  const activeSeriesIds = (seriesRows ?? []).map((row) => row.id).filter(Boolean);
+  if (activeSeriesIds.length === 0) return [];
+
+  const pageSize = 1000;
+  const rows: Array<Record<string, any>> = [];
+  for (let from = 0; ; from += pageSize) {
+    const page = await supabase
+      .from("production_plan_overview")
+      .select(
+        "id, series_id, plan_name, product_name, product_type, planned_date, planned_time, production_batch_id, stored_status, derived_status",
+      )
+      .in("series_id", activeSeriesIds)
+      .gte("planned_date", startDate)
+      .lte("planned_date", endDate)
+      .eq("stored_status", "planned")
+      .is("production_batch_id", null)
+      .order("planned_date")
+      .order("planned_time")
+      .order("id")
+      .range(from, from + pageSize - 1);
+
+    if (page.error) throw page.error;
+
+    const pageRows = (page.data ?? []) as Array<Record<string, any>>;
+    rows.push(...pageRows);
+    if (pageRows.length < pageSize) break;
+  }
+
+  return rows.map((row) => ({
+    id: row.id,
+    seriesStatus: "active",
+    planName: row.plan_name || row.product_name,
+    productName: row.product_name,
+    productType: row.product_type,
+    plannedDate: row.planned_date,
+    plannedTime: row.planned_time ?? "06:30:00",
+    productionBatchId: row.production_batch_id,
+    storedStatus: row.stored_status,
+    derivedStatus: row.derived_status,
   }));
 }
 
@@ -2142,6 +2657,9 @@ export async function fetchProductionPlanConfirmationContext(planId: string): Pr
       ? data.selections
           .filter(isRecord)
           .map((selection) => ({
+            nodeKey: String(selection.nodeKey ?? ""),
+            parentNodeKey: typeof selection.parentNodeKey === "string" ? selection.parentNodeKey : null,
+            depth: Number(selection.depth ?? 0),
             expectedProductId: String(selection.expectedProductId),
             selectedProductId: String(selection.selectedProductId),
             lotId: typeof selection.lotId === "string" ? selection.lotId : null,
@@ -2598,6 +3116,18 @@ function logDevWarning(message: string, error: unknown) {
   if (import.meta.env.DEV) {
     console.warn(message, error);
   }
+}
+
+function toDateKey(value: string | null | undefined) {
+  if (!value) return "";
+  const storedDate = value.match(/^(\d{4}-\d{2}-\d{2})/)?.[1];
+  if (storedDate) return storedDate;
+  const parsedDate = new Date(value);
+  if (Number.isNaN(parsedDate.getTime())) return "";
+  const year = parsedDate.getFullYear();
+  const month = String(parsedDate.getMonth() + 1).padStart(2, "0");
+  const day = String(parsedDate.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function formatDate(value: string) {
