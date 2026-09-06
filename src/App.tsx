@@ -18,7 +18,7 @@ import {
 import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { AppWindowIcon, CodeIcon } from "lucide-react";
+import { AppWindowIcon, CodeIcon, ShieldAlertIcon } from "lucide-react";
 import { check as checkForTauriUpdate, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import {
   Handle,
@@ -73,6 +73,13 @@ import {
   mergeProductionSchemaBranches,
 } from "./lib/productionSubstitution";
 import { selectProductionConsumptionBoundary } from "./lib/productionConsumptionBoundary";
+import { AuthDiagnosticsPanel } from "./AuthDiagnosticsPanel";
+import {
+  copyReportToClipboard,
+  getLastSignOutRecord,
+  handleAuthDiagnosticsStateChange,
+  markManualSignOut,
+} from "./lib/authDiagnostics";
 import { getAuthUserInitials, getAuthUserLabel, isSupabaseConfigured, supabase } from "./lib/supabase";
 import {
   archiveProductionPlanSeries,
@@ -122,7 +129,12 @@ import {
   fetchSupplierMaterialAssignments,
   fetchSupplierRawMaterialCatalog,
   fetchSuppliers,
+  calculateReceptionDraftTotalHt,
+  calculateReceptionGroupTotalHt,
   formatApiError,
+  formatPriceMAD,
+  isValidUnitPriceHt,
+  parseUnitPriceHt,
   markProductionBatchesPdfExported,
   markReceptionBatchesPdfExported,
   saveProductSchema,
@@ -249,6 +261,7 @@ type ReceptionDraftLine = {
   productName: string;
   unit: string;
   quantity: string;
+  unitPriceHt: string;
   supplierLot: string;
   expiryDate: string;
   transportTemperature: string;
@@ -630,6 +643,7 @@ function App() {
   const [updaterDetails, setUpdaterDetails] = useState<UpdaterDetails | null>(null);
   const [updaterProgress, setUpdaterProgress] = useState<UpdaterProgress>({ percent: 0, downloadedBytes: 0, totalBytes: 0 });
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [isDiagnosticsModalOpen, setIsDiagnosticsModalOpen] = useState(false);
   const autoConfirmInFlightRef = useRef(false);
   const autoConfirmLastAttemptRef = useRef<Record<string, number>>({});
   const [autoConfirmMessage, setAutoConfirmMessage] = useState("");
@@ -756,13 +770,15 @@ function App() {
     let mounted = true;
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
+      handleAuthDiagnosticsStateChange("INITIAL_SESSION", data.session);
       setAuthUser(data.session?.user ?? null);
       setAuthStatus(data.session?.user ? "authenticated" : "unauthenticated");
     });
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      handleAuthDiagnosticsStateChange(event, session);
       setAuthUser(session?.user ?? null);
       setAuthStatus(session?.user ? "authenticated" : "unauthenticated");
     });
@@ -835,6 +851,7 @@ function App() {
 
   async function handleSignOut() {
     if (!supabase) return;
+    markManualSignOut();
     await supabase.auth.signOut();
     setAuthUser(null);
     setAuthStatus("unauthenticated");
@@ -986,6 +1003,7 @@ function App() {
           currentUser={authUser}
           dataStatus={dataStatus}
           onInstallUpdate={() => void handleInstallUpdate()}
+          onOpenDiagnostics={() => setIsDiagnosticsModalOpen(true)}
           onUpdaterButtonClick={handleUpdaterButtonClick}
           theme={theme}
           updaterDetails={updaterDetails}
@@ -995,6 +1013,24 @@ function App() {
           updaterStatus={updaterStatus}
           onThemeChange={setTheme}
         />
+        {isDiagnosticsModalOpen ? (
+          <AppDialogShell
+            footer={
+              <AppButton onClick={() => setIsDiagnosticsModalOpen(false)} type="button" variant="secondary">
+                Fermer
+              </AppButton>
+            }
+            mode="modal"
+            onClose={() => setIsDiagnosticsModalOpen(false)}
+            onSubmit={(event) => {
+              event.preventDefault();
+              setIsDiagnosticsModalOpen(false);
+            }}
+            title="Diagnostics d'Authentification & État du Poste"
+          >
+            <AuthDiagnosticsPanel currentUser={authUser} isModal onClose={() => setIsDiagnosticsModalOpen(false)} />
+          </AppDialogShell>
+        ) : null}
         <CachedScreen active={activeView === "dashboard"}>
           <DashboardModule
             active={activeView === "dashboard"}
@@ -1158,6 +1194,18 @@ function AuthScreen({
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "signing" | "error">("idle");
   const [message, setMessage] = useState("");
+  const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
+  const [copiedQuick, setCopiedQuick] = useState(false);
+
+  const lastSignOut = getLastSignOutRecord();
+
+  async function handleQuickCopy() {
+    const ok = await copyReportToClipboard(null);
+    if (ok) {
+      setCopiedQuick(true);
+      setTimeout(() => setCopiedQuick(false), 2500);
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1185,34 +1233,83 @@ function AuthScreen({
 
   return (
     <main className="auth-shell">
-      <form className="auth-card login-card" onSubmit={(event) => void handleSubmit(event)}>
-        <div className="auth-brand">
-          <span className="brand-mark">
-            <AppIcon name="brand" />
-          </span>
-          <div>
-            <h1>Tracability OS</h1>
-            <p>Connexion utilisateur</p>
+      <div className="auth-shell-content">
+        <form className="auth-card login-card" onSubmit={(event) => void handleSubmit(event)}>
+          <div className="auth-brand">
+            <span className="brand-mark">
+              <AppIcon name="brand" />
+            </span>
+            <div>
+              <h1>Tracability OS</h1>
+              <p>Connexion utilisateur</p>
+            </div>
           </div>
-        </div>
-        {authStatus === "unconfigured" ? <p className="auth-note error">Supabase n'est pas configure.</p> : null}
-        <Field label="Email">
-          <input autoComplete="email" onChange={(event) => setEmail(event.target.value)} type="email" value={email} />
-        </Field>
-        <Field label="Mot de passe">
-          <input autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} type="password" value={password} />
-        </Field>
-        {message ? <p className={cx("save-message", status === "error" && "error")}>{message}</p> : null}
-        <div className="auth-actions">
-          <AppButton className="auth-theme-toggle" onClick={onThemeToggle} type="button" variant="secondary">
-            <AppIcon name={getThemeIcon(theme)} />
-            {getThemeLabel(theme)}
-          </AppButton>
-          <AppButton disabled={status === "signing" || authStatus === "unconfigured"} type="submit">
-            {status === "signing" ? <TraceabilityLoader compact label="Connexion..." /> : "Se connecter"}
-          </AppButton>
-        </div>
-      </form>
+
+          {lastSignOut && !lastSignOut.isManual ? (
+            <div className="auth-unexpected-signout-banner">
+              <div className="auth-unexpected-banner-top">
+                <span className="auth-unexpected-icon">⚠️</span>
+                <div className="auth-unexpected-text">
+                  <strong>Déconnexion automatique inattendue</strong>
+                  <span>
+                    {lastSignOut.localTimeFormatted} • {lastSignOut.summary}
+                  </span>
+                </div>
+              </div>
+              <div className="auth-unexpected-banner-actions">
+                <button
+                  className="auth-unexpected-copy-btn"
+                  onClick={() => void handleQuickCopy()}
+                  type="button"
+                >
+                  {copiedQuick ? "✓ Rapport copié !" : "📋 Copier le rapport de diagnostic"}
+                </button>
+                <button
+                  className="auth-unexpected-details-btn"
+                  onClick={() => setIsDiagnosticsOpen((prev) => !prev)}
+                  type="button"
+                >
+                  {isDiagnosticsOpen ? "Masquer les détails" : "🔍 Voir détails & tests"}
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {authStatus === "unconfigured" ? <p className="auth-note error">Supabase n'est pas configure.</p> : null}
+          <Field label="Email">
+            <input autoComplete="email" onChange={(event) => setEmail(event.target.value)} type="email" value={email} />
+          </Field>
+          <Field label="Mot de passe">
+            <input autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} type="password" value={password} />
+          </Field>
+          {message ? <p className={cx("save-message", status === "error" && "error")}>{message}</p> : null}
+          <div className="auth-actions">
+            <AppButton className="auth-theme-toggle" onClick={onThemeToggle} type="button" variant="secondary">
+              <AppIcon name={getThemeIcon(theme)} />
+              {getThemeLabel(theme)}
+            </AppButton>
+            <AppButton disabled={status === "signing" || authStatus === "unconfigured"} type="submit">
+              {status === "signing" ? <TraceabilityLoader compact label="Connexion..." /> : "Se connecter"}
+            </AppButton>
+          </div>
+
+          <div className="auth-footer-diagnostics">
+            <button
+              className="auth-diag-link-btn"
+              onClick={() => setIsDiagnosticsOpen((prev) => !prev)}
+              type="button"
+            >
+              🔍 {isDiagnosticsOpen ? "Masquer les outils de diagnostic" : "Diagnostics d'authentification & état du poste"}
+            </button>
+          </div>
+        </form>
+
+        {isDiagnosticsOpen ? (
+          <div className="auth-diagnostics-expanded-wrapper">
+            <AuthDiagnosticsPanel currentUser={null} onClose={() => setIsDiagnosticsOpen(false)} />
+          </div>
+        ) : null}
+      </div>
     </main>
   );
 }
@@ -2572,12 +2669,13 @@ function ReceptionList({
                 <th>Lot reception</th>
                 <th>Articles</th>
                 <th>Quantite</th>
+                <th>Montant HT</th>
                 <th>Statut</th>
               </tr>
             </thead>
             <tbody>
               {receptionBatches.length === 0 ? (
-                <TableEmpty colSpan={8}>Aucune reception batch enregistree.</TableEmpty>
+                <TableEmpty colSpan={9}>Aucune reception batch enregistree.</TableEmpty>
               ) : null}
               {receptionGroups.map((group) => (
                 <tr
@@ -2606,6 +2704,7 @@ function ReceptionList({
                   </td>
                   <td>{group.articleCount}</td>
                   <td>{group.quantitySummary}</td>
+                  <td>{formatPriceMAD(group.totalPriceHt)}</td>
                   <td>
                     <ReceptionStatusBadge status={group.status} />
                   </td>
@@ -2663,6 +2762,7 @@ function groupReceptionBatchesBySupplierAndDate(receptionBatches: ReceptionBatch
       batchNumbers: string[];
       articleCount: number;
       quantitySummary: string;
+      totalPriceHt: number | null;
       status: ReceptionStatus;
       validatedByActors: ReceptionBatch["validatedBy"][];
       isExported: boolean;
@@ -2681,6 +2781,7 @@ function groupReceptionBatchesBySupplierAndDate(receptionBatches: ReceptionBatch
       group.batchNumbers.push(batch.batchNumber);
       group.articleCount += batch.articleCount;
       group.quantitySummary = summarizeReceptionGroupQuantities(group.batches);
+      group.totalPriceHt = calculateReceptionGroupTotalHt(group.batches);
       group.status = group.status === "non_conforme" || batch.status === "non_conforme" ? "non_conforme" : "conforme";
       group.validatedByActors.push(batch.validatedBy);
       group.isExported = group.isExported || Boolean(batch.exportedAt);
@@ -2694,6 +2795,7 @@ function groupReceptionBatchesBySupplierAndDate(receptionBatches: ReceptionBatch
       batchNumbers: [batch.batchNumber],
       articleCount: batch.articleCount,
       quantitySummary: batch.quantitySummary,
+      totalPriceHt: batch.totalPriceHt != null && Number.isFinite(batch.totalPriceHt) ? batch.totalPriceHt : null,
       status: batch.status,
       validatedByActors: [batch.validatedBy],
       isExported: Boolean(batch.exportedAt),
@@ -2788,6 +2890,7 @@ function ReceptionDetails({
             productName: line.productName,
             unit: line.unit,
             quantity: String(line.quantity),
+            unitPriceHt: line.unitPriceHt === null || line.unitPriceHt === undefined ? "" : String(line.unitPriceHt),
             supplierLot: line.supplierLot,
             expiryDate: line.expiryDate ?? "",
             transportTemperature: line.transportTemperatureC === null ? "" : String(line.transportTemperatureC),
@@ -2851,6 +2954,7 @@ function ReceptionDetails({
         productName: product.name,
         unit: product.unit,
         quantity: "",
+        unitPriceHt: product.latestUnitPriceHt != null ? String(product.latestUnitPriceHt) : "",
         supplierLot: "",
         expiryDate: "",
         transportTemperature: "",
@@ -2895,18 +2999,23 @@ function ReceptionDetails({
         supplierId,
         receptionDate: receptionTimestamp,
         observations: observationParts.length > 0 ? observationParts.join("\n") : null,
-        lines: lines.map<ReceptionBatchLineInput>((line) => ({
-          id: line.lineId,
-          productId: line.productId,
-          supplierLot: line.supplierLot,
-          quantity: Number(line.quantity),
-          unit: line.unit,
-          expiryDate: line.expiryDate || null,
-          transportTemperatureC: Number.isFinite(Number(line.transportTemperature)) ? Number(line.transportTemperature) : null,
-          temperatureStatus: line.temperatureStatus,
-          hygieneStatus: line.hygieneStatus,
-          observations: line.observations || null,
-        })),
+        lines: lines.map<ReceptionBatchLineInput>((line) => {
+          const parsedPrice = parseUnitPriceHt(line.unitPriceHt);
+          const parsedQty = Number(String(line.quantity).replace(/,/g, ".").trim());
+          return {
+            id: line.lineId,
+            productId: line.productId,
+            supplierLot: line.supplierLot,
+            quantity: Number.isFinite(parsedQty) ? parsedQty : 0,
+            unit: line.unit,
+            unitPriceHt: parsedPrice,
+            expiryDate: line.expiryDate || null,
+            transportTemperatureC: Number.isFinite(Number(line.transportTemperature)) ? Number(line.transportTemperature) : null,
+            temperatureStatus: line.temperatureStatus,
+            hygieneStatus: line.hygieneStatus,
+            observations: line.observations || null,
+          };
+        }),
       };
       const batchId =
         isEditingReception && primaryEditingBatch
@@ -2944,14 +3053,34 @@ function ReceptionDetails({
 	                <thead>
 	                  <tr>
 	                    <th>Produit</th>
+	                    <th>Dernier prix</th>
 	                    <th>Categorie</th>
 	                  </tr>
 	                </thead>
 	                <tbody>
 	                  {filteredCatalog.map((product) => (
-	                    <tr key={product.id} onDoubleClick={() => addCatalogProduct(product)}>
+	                    <tr
+	                      key={product.id}
+	                      onDoubleClick={() => addCatalogProduct(product)}
+	                      onKeyDown={(event) => {
+	                        if (event.key === "Enter" || event.key === " ") {
+	                          event.preventDefault();
+	                          addCatalogProduct(product);
+	                        }
+	                      }}
+	                      role="button"
+	                      tabIndex={0}
+	                      title="Double-cliquez ou appuyez sur Entrée pour ajouter"
+	                    >
 	                      <td>
 	                        <strong>{product.name}</strong>
+	                      </td>
+	                      <td>
+	                        {product.latestUnitPriceHt != null ? (
+	                          <span className="reception-ref-price">{formatPriceMAD(product.latestUnitPriceHt)}</span>
+	                        ) : (
+	                          <span className="muted-cell">--</span>
+	                        )}
 	                      </td>
 	                      <td>
 	                        <span className="reception-category-badge">Sec</span>
@@ -2959,7 +3088,7 @@ function ReceptionDetails({
 	                    </tr>
 	                  ))}
 	                  {supplierId && filteredCatalog.length === 0 ? (
-	                    <TableEmpty colSpan={2}>Aucune matiere premiere associee a ce fournisseur.</TableEmpty>
+	                    <TableEmpty colSpan={3}>Aucune matiere premiere associee a ce fournisseur.</TableEmpty>
 	                  ) : null}
 	                </tbody>
 	              </table>
@@ -3014,7 +3143,13 @@ function ReceptionDetails({
 	                  <span className="panel-icon">AR</span>
 	                  <div>
 	                    <h2>Articles Receptionnes</h2>
-	                    <p>{lines.length} article(s)</p>
+	                    <p>
+	                      {lines.length} article(s)
+	                      {(() => {
+	                        const draftTotal = calculateReceptionDraftTotalHt(lines);
+	                        return draftTotal > 0 ? ` • Total: ${formatPriceMAD(draftTotal)}` : "";
+	                      })()}
+	                    </p>
 	                  </div>
 	                </div>
 	              </div>
@@ -5718,15 +5853,16 @@ function ProductionLotDropdown({
 
 function renderAvailableLotText(lot: AvailableLotOption) {
   const responsibleName = lot.sourceType === "fabrication" ? lot.responsibleName : null;
-  return renderLotText(lot.supplierLot || lot.lotNumber, lot.createdAt, responsibleName);
+  return renderLotText(lot.supplierLot || lot.lotNumber, lot.createdAt, responsibleName, lot.unitPriceHt);
 }
 
-function renderLotText(lotNumber: string, dateValue: string, responsibleName?: string | null) {
+function renderLotText(lotNumber: string, dateValue: string, responsibleName?: string | null, unitPriceHt?: number | null) {
   const cleanedResponsibleName = responsibleName?.trim();
   return (
     <span className="production-lot-label">
       <strong>{lotNumber}</strong>
       <span>| {formatDate(dateValue)}</span>
+      {unitPriceHt != null ? <span>| {formatPriceMAD(unitPriceHt)}</span> : null}
       {cleanedResponsibleName ? <span className="production-lot-responsible">| {cleanedResponsibleName}</span> : null}
     </span>
   );
@@ -5742,6 +5878,7 @@ function ReceptionBatchLinesTable({ lines, status }: { lines: ReceptionBatchLine
             <th>Lot interne</th>
             <th>Lot fournisseur</th>
             <th>Quantite</th>
+            <th>Prix unit. HT</th>
             <th>Peremption</th>
             <th>Temp.</th>
             <th>Qualite</th>
@@ -5750,15 +5887,15 @@ function ReceptionBatchLinesTable({ lines, status }: { lines: ReceptionBatchLine
         </thead>
         <tbody>
           {status === "loading" ? (
-            <TableEmpty colSpan={8}>
+            <TableEmpty colSpan={9}>
               <TraceabilityLoader label="Chargement des lignes..." />
             </TableEmpty>
           ) : null}
           {status === "error" ? (
-            <TableEmpty colSpan={8}>Impossible de charger les lignes.</TableEmpty>
+            <TableEmpty colSpan={9}>Impossible de charger les lignes.</TableEmpty>
           ) : null}
           {status === "idle" && lines.length === 0 ? (
-            <TableEmpty colSpan={8}>Aucune ligne pour cette reception.</TableEmpty>
+            <TableEmpty colSpan={9}>Aucune ligne pour cette reception.</TableEmpty>
           ) : null}
           {lines.map((line) => (
             <tr className={cx(line.status === "non_conforme" && "nonconform-row")} key={line.id}>
@@ -5769,6 +5906,7 @@ function ReceptionBatchLinesTable({ lines, status }: { lines: ReceptionBatchLine
               <td>{line.internalLot}</td>
               <td>{line.supplierLot}</td>
               <td>{`${line.quantity.toLocaleString("fr-FR")} ${line.unit}`}</td>
+              <td>{formatPriceMAD(line.unitPriceHt)}</td>
               <td>{line.expiryDate ? formatDate(line.expiryDate) : "--"}</td>
               <td>{line.transportTemperatureC === null ? "--" : `${line.transportTemperatureC} C`}</td>
               <td>{`${formatReceptionStatus(line.temperatureStatus)} / ${formatReceptionStatus(line.hygieneStatus)}`}</td>
@@ -5893,13 +6031,14 @@ function ReceptionEntryLinesTable({
 	            <th>Produit</th>
 	            <th>Qte</th>
 	            <th>Unite</th>
+	            <th>Prix unit. HT (MAD)</th>
 	            <th>Lot fournisseur</th>
 	            <th>Date de Peremption</th>
 	          </tr>
 	        </thead>
 	        <tbody>
 	          {lines.length === 0 ? (
-	            <TableEmpty colSpan={6}>Ajoutez des articles depuis le catalogue fournisseur.</TableEmpty>
+	            <TableEmpty colSpan={7}>Ajoutez des articles depuis le catalogue fournisseur.</TableEmpty>
 	          ) : null}
 	          {lines.map((line) => (
 	            <tr className={cx(selectedLineIds.includes(line.localId) && "selected-row")} key={line.localId}>
@@ -5936,6 +6075,18 @@ function ReceptionEntryLinesTable({
 	              <td>
 	                <input
 	                  data-line-id={line.localId}
+	                  data-reception-nav-field="unitPriceHt"
+	                  inputMode="decimal"
+	                  placeholder="0,00"
+	                  onChange={(event) => onUpdate(line.localId, { unitPriceHt: event.target.value.replace(/,/g, ".") })}
+	                  pattern="[0-9]*[.,]?[0-9]*"
+	                  type="text"
+	                  value={line.unitPriceHt ?? ""}
+	                />
+	              </td>
+	              <td>
+	                <input
+	                  data-line-id={line.localId}
 	                  data-reception-nav-field="supplierLot"
 	                  value={line.supplierLot}
 	                  onChange={(event) => onUpdate(line.localId, { supplierLot: event.target.value })}
@@ -5960,8 +6111,10 @@ function validateReceptionDraft(supplierId: string, lines: ReceptionDraftLine[])
 
   for (const line of lines) {
     if (!line.productId) return "Chaque ligne doit avoir un produit.";
-    if (!line.quantity || Number(line.quantity) <= 0) return `Quantite invalide pour ${line.productName}.`;
+    const cleanQty = Number(String(line.quantity).replace(/,/g, ".").trim());
+    if (!line.quantity || !Number.isFinite(cleanQty) || cleanQty <= 0) return `Quantite invalide pour ${line.productName}.`;
     if (!line.unit) return `Unite manquante pour ${line.productName}.`;
+    if (!isValidUnitPriceHt(line.unitPriceHt)) return `Prix unitaire invalide pour ${line.productName}.`;
     if (!line.supplierLot.trim()) return `Lot fournisseur manquant pour ${line.productName}.`;
   }
 
@@ -7762,13 +7915,14 @@ function RecentReceptionsTable({ recentReceptions }: { recentReceptions: RecentR
             <th>Lot frs</th>
             <th>Lot interne</th>
             <th>Quantite</th>
+            <th>Prix unit. HT</th>
             <th>Peremption</th>
             <th>Statut</th>
           </tr>
         </thead>
         <tbody>
           {recentReceptions.length === 0 ? (
-            <TableEmpty colSpan={8}>Aucune reception enregistree dans Supabase.</TableEmpty>
+            <TableEmpty colSpan={9}>Aucune reception enregistree dans Supabase.</TableEmpty>
           ) : null}
           {recentReceptions.map((reception) => (
             <tr className={cx(reception.status === "non_conforme" && "nonconform-row")} key={reception.id}>
@@ -7780,6 +7934,7 @@ function RecentReceptionsTable({ recentReceptions }: { recentReceptions: RecentR
                 <strong>{reception.internalLot}</strong>
               </td>
               <td>{reception.quantity}</td>
+              <td>{formatPriceMAD(reception.unitPriceHt)}</td>
               <td>{reception.expiry}</td>
               <td>
                 <ReceptionStatusBadge status={reception.status} />
@@ -7992,7 +8147,10 @@ function SuppliersModule({
         await onSuppliersChanged();
         setMaterialModalOpen(false);
       } else {
-        const productId = await createRawMaterialCatalogItem({ name: normalizedName, unit: rawMaterialForm.unit });
+        const productId = await createRawMaterialCatalogItem({
+          name: normalizedName,
+          unit: rawMaterialForm.unit,
+        });
         const targetSupplierId = rawMaterialForm.supplierId || selectedSupplierId;
         const targetProductIds = assignments[targetSupplierId] ?? [];
         const saved = await persistSupplierMaterialsForSupplier(targetSupplierId, [...new Set([...targetProductIds, productId])], "Matiere ajoutee.");
@@ -8512,6 +8670,7 @@ type ProductLotOption = {
   sourceId: string | null;
   dateValue: string;
   actor: AuditActor;
+  unitPriceHt?: number | null;
 };
 
 function TraceabilityLotDropdown({
@@ -8537,7 +8696,7 @@ function TraceabilityLotDropdown({
 
   const disabled = lots.length === 0;
   const label = selectedLot ? (
-    renderLotText(selectedLot.supplierLot || selectedLot.lotNumber, selectedLot.dateValue)
+    renderLotText(selectedLot.supplierLot || selectedLot.lotNumber, selectedLot.dateValue, undefined, selectedLot.unitPriceHt)
   ) : (
     <span className="production-lot-placeholder">Aucun lot disponible</span>
   );
@@ -8561,7 +8720,7 @@ function TraceabilityLotDropdown({
               }}
               type="button"
             >
-              {renderLotText(lot.supplierLot || lot.lotNumber, lot.dateValue)}
+              {renderLotText(lot.supplierLot || lot.lotNumber, lot.dateValue, undefined, lot.unitPriceHt)}
               {selectedLot?.id === lot.id ? <AppIcon name="check" /> : null}
             </button>
           ))}
@@ -8751,6 +8910,7 @@ function TraceabilityModule({
           sourceId: lot.sourceId,
           dateValue: lot.createdAt,
           actor: lot.actor,
+          unitPriceHt: lot.unitPriceHt,
         });
       }
     }
@@ -11418,6 +11578,7 @@ function Topbar({
   currentUser,
   dataStatus,
   onInstallUpdate,
+  onOpenDiagnostics,
   onUpdaterButtonClick,
   theme,
   updaterDetails,
@@ -11430,6 +11591,7 @@ function Topbar({
   currentUser: User | null;
   dataStatus: "unconfigured" | "loading" | "connected" | "error";
   onInstallUpdate: () => void;
+  onOpenDiagnostics: () => void;
   onUpdaterButtonClick: () => void;
   theme: ThemeMode;
   updaterDetails: UpdaterDetails | null;
@@ -11481,6 +11643,15 @@ function Topbar({
             "Supabase non configure"
           )}
         </span>
+        <button
+          className="topbar-diag-btn"
+          onClick={onOpenDiagnostics}
+          title="Diagnostics de session & horloge"
+          type="button"
+        >
+          <ShieldAlertIcon size={14} />
+          <span>Diagnostics</span>
+        </button>
         <div className="theme-picker-control" ref={themePickerRef}>
           <button
             aria-controls={themeMenuId}

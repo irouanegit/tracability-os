@@ -10,6 +10,14 @@ export type ProductCategory = "beldi" | "boulangerie" | "cake" | "patisserie" | 
 export type RecipeStatus = "active" | "missing" | "not_required";
 export type ReceptionStatus = "conforme" | "non_conforme";
 
+export {
+  formatPriceMAD,
+  parseUnitPriceHt,
+  isValidUnitPriceHt,
+  calculateReceptionDraftTotalHt,
+  calculateReceptionGroupTotalHt,
+} from "./dateFormat";
+
 export type Product = {
   id: string;
   code: string;
@@ -17,6 +25,7 @@ export type Product = {
   type: ProductType;
   category: ProductCategory | null;
   unit: string;
+  latestUnitPriceHt?: number | null;
   recipeStatus: RecipeStatus;
   componentCount: number;
   componentNames: string[];
@@ -103,6 +112,7 @@ export type RecentReception = {
   quantity: string;
   expiry: string;
   status: ReceptionStatus;
+  unitPriceHt?: number | null;
 };
 
 export type AuditActor = {
@@ -123,6 +133,8 @@ export type ReceptionBatch = {
   quantitySummary: string;
   status: ReceptionStatus;
   observations: string | null;
+  unitPriceHt?: number | null;
+  totalPriceHt?: number | null;
   validatedBy: AuditActor;
   validatedAt: string | null;
   updatedBy: AuditActor;
@@ -147,6 +159,7 @@ export type ReceptionBatchLine = {
   hygieneStatus: ReceptionStatus;
   status: ReceptionStatus;
   observations: string | null;
+  unitPriceHt: number | null;
 };
 
 export type ReceptionInput = {
@@ -163,6 +176,7 @@ export type ReceptionInput = {
   nonconformityReason: string | null;
   correctiveAction: string | null;
   observations: string | null;
+  unitPriceHt?: number | null;
 };
 
 export type ReceptionBatchLineInput = {
@@ -176,6 +190,7 @@ export type ReceptionBatchLineInput = {
   temperatureStatus: ReceptionStatus;
   hygieneStatus: ReceptionStatus;
   observations: string | null;
+  unitPriceHt?: number | null;
 };
 
 export type ReceptionBatchInput = {
@@ -393,6 +408,7 @@ export type AvailableLotOption = {
   createdAt: string;
   availableAt: string;
   responsibleName: string | null;
+  unitPriceHt?: number | null;
 };
 
 export type ProductionTraceabilityInput = {
@@ -668,7 +684,7 @@ export async function fetchProductCatalog(): Promise<Product[]> {
       .select(lotSelect)
       .order("type")
       .order("name");
-    data = fallback.data ?? null;
+    data = (fallback.data ?? null) as Array<Record<string, any>> | null;
     error = fallback.error;
   }
 
@@ -678,7 +694,7 @@ export async function fetchProductCatalog(): Promise<Product[]> {
       .select(categorySelect)
       .order("type")
       .order("name");
-    data = fallback.data?.map((row) => ({ ...row, lot_zone: null, lot_code: null })) ?? null;
+    data = (fallback.data?.map((row) => ({ ...row, lot_zone: null, lot_code: null })) ?? null) as Array<Record<string, any>> | null;
     error = fallback.error;
   }
 
@@ -688,7 +704,7 @@ export async function fetchProductCatalog(): Promise<Product[]> {
       .select(legacySelect)
       .order("type")
       .order("name");
-    data = fallback.data?.map((row) => ({ ...row, category: null, lot_zone: null, lot_code: null })) ?? null;
+    data = (fallback.data?.map((row) => ({ ...row, category: null, lot_zone: null, lot_code: null })) ?? null) as Array<Record<string, any>> | null;
     error = fallback.error;
   }
 
@@ -1099,20 +1115,22 @@ async function fetchProductCatalogByIds(productIds: string[]): Promise<Product[]
   const fullSelect = "id, code, name, type, category, unit, recipe_status, component_count, updated_at, lot_zone, lot_code";
   const categorySelect = "id, code, name, type, category, unit, recipe_status, component_count, updated_at";
   const legacySelect = "id, code, name, type, unit, recipe_status, component_count, updated_at";
-  let { data, error } = await supabase
+  const query = await supabase
     .from("product_catalog")
     .select(fullSelect)
     .in("id", productIds);
+  let data = query.data as Array<Record<string, any>> | null;
+  let error = query.error;
 
   if (error && (isMissingColumnError(error, "lot_zone") || isMissingColumnError(error, "lot_code"))) {
     const fallback = await supabase.from("product_catalog").select(categorySelect).in("id", productIds);
-    data = fallback.data?.map((row) => ({ ...row, lot_zone: null, lot_code: null })) ?? null;
+    data = (fallback.data?.map((row) => ({ ...row, lot_zone: null, lot_code: null })) ?? null) as Array<Record<string, any>> | null;
     error = fallback.error;
   }
 
   if (error && isMissingColumnError(error, "category")) {
     const fallback = await supabase.from("product_catalog").select(legacySelect).in("id", productIds);
-    data = fallback.data?.map((row) => ({ ...row, category: null, lot_zone: null, lot_code: null })) ?? null;
+    data = (fallback.data?.map((row) => ({ ...row, category: null, lot_zone: null, lot_code: null })) ?? null) as Array<Record<string, any>> | null;
     error = fallback.error;
   }
 
@@ -1232,10 +1250,23 @@ export async function updateSupplier(id: string, input: SupplierInput) {
 export async function fetchRecentReceptions(limit = 20): Promise<RecentReception[]> {
   if (!supabase) return [];
 
-  const { data, error } = await supabase
+  const baseColumns = "id, reception_date, product_name, supplier_name, supplier_lot, internal_lot, quantity, unit, expiry_date, status";
+  const primaryQuery = await supabase
     .from("recent_raw_material_receptions")
-    .select("id, reception_date, product_name, supplier_name, supplier_lot, internal_lot, quantity, unit, expiry_date, status")
+    .select(`${baseColumns}, unit_price_ht`)
     .limit(limit);
+
+  let data = primaryQuery.data as Array<Record<string, any>> | null;
+  let error = primaryQuery.error;
+
+  if (error && (error.code === "42703" || error.code === "PGRST204" || error.message.includes("unit_price_ht"))) {
+    const fallback = await supabase
+      .from("recent_raw_material_receptions")
+      .select(baseColumns)
+      .limit(limit);
+    data = fallback.data as Array<Record<string, any>> | null;
+    error = fallback.error;
+  }
 
   if (error) throw error;
 
@@ -1249,6 +1280,7 @@ export async function fetchRecentReceptions(limit = 20): Promise<RecentReception
     quantity: `${Number(row.quantity).toLocaleString("fr-FR")} ${row.unit}`,
     expiry: row.expiry_date ? formatDate(row.expiry_date) : "--",
     status: row.status,
+    unitPriceHt: row.unit_price_ht === null || row.unit_price_ht === undefined ? null : Number(row.unit_price_ht),
   }));
 }
 
@@ -1256,6 +1288,7 @@ export async function fetchReceptionBatches(): Promise<ReceptionBatch[]> {
   if (!supabase) return [];
 
   const baseColumns = "id, batch_number, reception_date, supplier_id, supplier_name, status, observations, article_count, quantity_summary";
+  const priceColumns = "total_price_ht, unit_price_ht";
   const auditColumns =
     "validated_by, validated_at, validated_by_name, validated_by_email, updated_by, updated_at, updated_by_name, updated_by_email";
   const exportColumns = "exported_by, exported_at, exported_by_name, exported_by_email";
@@ -1280,7 +1313,7 @@ export async function fetchReceptionBatches(): Promise<ReceptionBatch[]> {
     }
   }
 
-  const query = await fetchAllRows(`${baseColumns}, ${auditColumns}, ${exportColumns}`);
+  const query = await fetchAllRows(`${baseColumns}, ${priceColumns}, ${auditColumns}, ${exportColumns}`);
   let data = (query.data ?? null) as Array<Record<string, any>> | null;
   let error = query.error;
 
@@ -1290,11 +1323,19 @@ export async function fetchReceptionBatches(): Promise<ReceptionBatch[]> {
       error.code === "PGRST204" ||
       error.message.includes("validated_by") ||
       error.message.includes("exported_by") ||
-      error.message.includes("exported_at"))
+      error.message.includes("exported_at") ||
+      error.message.includes("total_price_ht") ||
+      error.message.includes("unit_price_ht"))
   ) {
-    const fallback = await fetchAllRows(baseColumns);
-    data = fallback.data;
-    error = fallback.error;
+    const fallbackWithAudit = await fetchAllRows(`${baseColumns}, ${auditColumns}, ${exportColumns}`);
+    if (!fallbackWithAudit.error) {
+      data = fallbackWithAudit.data;
+      error = null;
+    } else {
+      const fallback = await fetchAllRows(baseColumns);
+      data = fallback.data;
+      error = fallback.error;
+    }
   }
 
   if (error) throw error;
@@ -1309,6 +1350,8 @@ export async function fetchReceptionBatches(): Promise<ReceptionBatch[]> {
     observations: row.observations,
     articleCount: row.article_count ?? 0,
     quantitySummary: row.quantity_summary ?? "--",
+    totalPriceHt: row.total_price_ht === null || row.total_price_ht === undefined ? null : Number(row.total_price_ht),
+    unitPriceHt: row.unit_price_ht === null || row.unit_price_ht === undefined ? null : Number(row.unit_price_ht),
     validatedBy: mapAuditActor(row, "validated_by", "validated_by_name", "validated_by_email"),
     validatedAt: "validated_at" in row ? row.validated_at : null,
     updatedBy: mapAuditActor(row, "updated_by", "updated_by_name", "updated_by_email"),
@@ -1372,12 +1415,25 @@ export async function fetchReceptionCalendarBatches(startDate: string, endDate: 
 export async function fetchReceptionBatchLines(batchId: string): Promise<ReceptionBatchLine[]> {
   if (!supabase || !batchId) return [];
 
-  const { data, error } = await supabase
+  const baseColumns =
+    "id, batch_id, product_id, product_code, product_name, supplier_lot, internal_lot, quantity, unit, expiry_date, transport_temperature_c, temperature_status, hygiene_status, status, observations";
+
+  const primaryQuery = await supabase
     .from("reception_batch_lines")
-    .select(
-      "id, batch_id, product_id, product_code, product_name, supplier_lot, internal_lot, quantity, unit, expiry_date, transport_temperature_c, temperature_status, hygiene_status, status, observations",
-    )
+    .select(`${baseColumns}, unit_price_ht`)
     .eq("batch_id", batchId);
+
+  let data = primaryQuery.data as Array<Record<string, any>> | null;
+  let error = primaryQuery.error;
+
+  if (error && (error.code === "42703" || error.code === "PGRST204" || error.message.includes("unit_price_ht"))) {
+    const fallback = await supabase
+      .from("reception_batch_lines")
+      .select(baseColumns)
+      .eq("batch_id", batchId);
+    data = fallback.data as Array<Record<string, any>> | null;
+    error = fallback.error;
+  }
 
   if (error) throw error;
 
@@ -1397,6 +1453,7 @@ export async function fetchReceptionBatchLines(batchId: string): Promise<Recepti
     hygieneStatus: row.hygiene_status,
     status: row.status,
     observations: row.observations,
+    unitPriceHt: row.unit_price_ht === null || row.unit_price_ht === undefined ? null : Number(row.unit_price_ht),
   }));
 }
 
@@ -1888,16 +1945,35 @@ export async function fetchAvailableLotsForProducts(
   if (uniqueProductIds.length === 0) return {};
 
   const fetchLimit = asOfDate ? Math.max(limit * 6, 30) : limit;
-  const { data, error } = await supabase
+  const selectWithPrice =
+    "id, product_id, lot_number, supplier_lot, unit_price_ht, source_type, source_id, created_at, supplier:suppliers(name), product:products(name, type, category)";
+  const selectBase =
+    "id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, supplier:suppliers(name), product:products(name, type, category)";
+
+  const primaryQuery = await supabase
     .from("lots")
-    .select(
-      "id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, supplier:suppliers(name), product:products(name, type, category)",
-    )
+    .select(selectWithPrice)
     .in("product_id", uniqueProductIds)
     .eq("lot_status", "available")
     .eq("quality_status", "conforme")
     .order("created_at", { ascending: false })
     .limit(fetchLimit * uniqueProductIds.length);
+
+  let data = primaryQuery.data as Array<Record<string, any>> | null;
+  let error = primaryQuery.error;
+
+  if (error && (error.code === "42703" || error.code === "PGRST204" || error.message.includes("unit_price_ht"))) {
+    const fallback = await supabase
+      .from("lots")
+      .select(selectBase)
+      .in("product_id", uniqueProductIds)
+      .eq("lot_status", "available")
+      .eq("quality_status", "conforme")
+      .order("created_at", { ascending: false })
+      .limit(fetchLimit * uniqueProductIds.length);
+    data = fallback.data as Array<Record<string, any>> | null;
+    error = fallback.error;
+  }
 
   if (error) throw error;
 
@@ -1971,6 +2047,7 @@ export async function fetchAvailableLotsForProducts(
       createdAt: row.created_at,
       availableAt,
       responsibleName: productionDetails?.responsibleName ?? null,
+      unitPriceHt: row.unit_price_ht === null || row.unit_price_ht === undefined ? null : Number(row.unit_price_ht),
     };
 
     if (!lotsByProductId[row.product_id]) lotsByProductId[row.product_id] = [];
@@ -2128,6 +2205,7 @@ export type ProductLotHistoryItem = {
   createdAt: string;
   effectiveAt: string | null;
   actor: AuditActor;
+  unitPriceHt?: number | null;
 };
 
 function mapProductLotHistoryRow(row: Record<string, any>, includeActor: boolean): ProductLotHistoryItem {
@@ -2142,6 +2220,7 @@ function mapProductLotHistoryRow(row: Record<string, any>, includeActor: boolean
     createdAt: row.created_at,
     effectiveAt: null,
     actor: includeActor ? mapAuditActor(row, "created_by", "created_by_name", "created_by_email") : emptyAuditActor,
+    unitPriceHt: row.unit_price_ht === null || row.unit_price_ht === undefined ? null : Number(row.unit_price_ht),
   };
 }
 
@@ -2201,24 +2280,42 @@ function sortProductLotHistoryByEffectiveDate(items: ProductLotHistoryItem[]) {
 export async function fetchLotHistoryForProduct(productId: string, limit = 50): Promise<ProductLotHistoryItem[]> {
   if (!supabase || !productId) return [];
 
-  const { data, error } = await supabase
+  const primaryQuery = await supabase
     .from("lots")
-    .select("id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, created_by, created_by_name, created_by_email, supplier:suppliers(name)")
+    .select("id, product_id, lot_number, supplier_lot, unit_price_ht, source_type, source_id, created_at, created_by, created_by_name, created_by_email, supplier:suppliers(name)")
     .eq("product_id", productId)
     .order("created_at", { ascending: false })
     .limit(limit);
 
+  let data = primaryQuery.data as Array<Record<string, any>> | null;
+  let error = primaryQuery.error;
+
   if (error) {
-    const fallback = await supabase
+    let fallbackData: Array<Record<string, any>> | null = null;
+    const fallbackWithActor = await supabase
       .from("lots")
-      .select("id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, supplier:suppliers(name)")
+      .select("id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, created_by, created_by_name, created_by_email, supplier:suppliers(name)")
       .eq("product_id", productId)
       .order("created_at", { ascending: false })
       .limit(limit);
 
-    if (fallback.error) return [];
+    if (!fallbackWithActor.error) {
+      fallbackData = fallbackWithActor.data as Array<Record<string, any>> | null;
+    } else {
+      const fallbackWithoutActor = await supabase
+        .from("lots")
+        .select("id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, supplier:suppliers(name)")
+        .eq("product_id", productId)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (!fallbackWithoutActor.error) {
+        fallbackData = fallbackWithoutActor.data as Array<Record<string, any>> | null;
+      }
+    }
+
+    if (!fallbackData) return [];
     const hydrated = await hydrateProductLotHistoryEffectiveDates(
-      (fallback.data ?? []).map((row) => mapProductLotHistoryRow(row, false)),
+      fallbackData.map((row) => mapProductLotHistoryRow(row, false)),
     );
     return sortProductLotHistoryByEffectiveDate(hydrated);
   }
@@ -2238,17 +2335,29 @@ export async function fetchLotHistoryForProducts(productIds: string[], perProduc
   if (!supabase || uniqueProductIds.length === 0) return lotsByProductId;
 
   const chunkSize = 80;
+  const selectWithPriceAndActor =
+    "id, product_id, lot_number, supplier_lot, unit_price_ht, source_type, source_id, created_at, created_by, created_by_name, created_by_email, supplier:suppliers(name)";
   const selectWithActor =
     "id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, created_by, created_by_name, created_by_email, supplier:suppliers(name)";
   const fallbackSelect = "id, product_id, lot_number, supplier_lot, source_type, source_id, created_at, supplier:suppliers(name)";
   let includeActor = true;
+  let includePrice = true;
 
   for (let index = 0; index < uniqueProductIds.length; index += chunkSize) {
     const chunk = uniqueProductIds.slice(index, index + chunkSize);
+    const selectClause = includePrice ? selectWithPriceAndActor : includeActor ? selectWithActor : fallbackSelect;
     let query = await (supabase.from("lots") as any)
-      .select(includeActor ? selectWithActor : fallbackSelect)
+      .select(selectClause)
       .in("product_id", chunk)
       .order("created_at", { ascending: false });
+
+    if (query.error && includePrice) {
+      includePrice = false;
+      query = await (supabase.from("lots") as any)
+        .select(includeActor ? selectWithActor : fallbackSelect)
+        .in("product_id", chunk)
+        .order("created_at", { ascending: false });
+    }
 
     if (query.error && includeActor) {
       includeActor = false;
@@ -2684,32 +2793,79 @@ export async function deleteProductionBatches(batchIds: string[]) {
 export async function fetchSupplierRawMaterialCatalog(supplierId: string): Promise<Product[]> {
   if (!supabase || !supplierId) return [];
 
-  const { data, error } = await supabase
+  const baseSelect = "product_id, code, name, type, unit, updated_at";
+  const selectWithPrice = `${baseSelect}, latest_unit_price_ht`;
+
+  const primaryQuery = await supabase
     .from("supplier_raw_material_catalog")
-    .select("product_id, code, name, type, unit, updated_at")
+    .select(selectWithPrice)
     .eq("supplier_id", supplierId)
     .order("name");
 
+  let data = primaryQuery.data as Array<Record<string, any>> | null;
+  let error = primaryQuery.error;
+
+  if (error && (isMissingColumnError(error, "latest_unit_price_ht") || error.code === "42703" || error.code === "PGRST204")) {
+    const fallback = await supabase
+      .from("supplier_raw_material_catalog")
+      .select(baseSelect)
+      .eq("supplier_id", supplierId)
+      .order("name");
+    data = fallback.data as Array<Record<string, any>> | null;
+    error = fallback.error;
+  }
+
   if (error) throw error;
 
-  return (data ?? []).map((row) => ({
-    id: row.product_id,
-    code: row.code,
-    name: row.name,
-    type: row.type,
-    category: null,
-    unit: row.unit,
-    recipeStatus: "not_required",
-    componentCount: 0,
-    componentNames: [],
-    lotZone: null,
-    lotCode: null,
-    createdBy: emptyAuditActor,
-    updatedBy: emptyAuditActor,
-    schemaUpdatedBy: emptyAuditActor,
-    schemaUpdatedAt: null,
-    lastUpdated: row.updated_at,
-  }));
+  const rows = data ?? [];
+  const hasViewPrices = rows.some((row) => "latest_unit_price_ht" in row && row.latest_unit_price_ht !== undefined);
+  const latestPricesMap = new Map<string, number>();
+
+  if (!hasViewPrices && rows.length > 0) {
+    const productIds = rows.map((r) => r.product_id);
+    const { data: recData } = await supabase
+      .from("raw_material_receptions")
+      .select("product_id, unit_price_ht, reception_date, created_at")
+      .in("product_id", productIds)
+      .not("unit_price_ht", "is", null)
+      .order("reception_date", { ascending: false })
+      .order("created_at", { ascending: false });
+
+    if (recData) {
+      for (const rec of recData) {
+        if (!latestPricesMap.has(rec.product_id) && rec.unit_price_ht !== null && rec.unit_price_ht !== undefined) {
+          latestPricesMap.set(rec.product_id, Number(rec.unit_price_ht));
+        }
+      }
+    }
+  }
+
+  return rows.map((row) => {
+    const rawPrice = "latest_unit_price_ht" in row && row.latest_unit_price_ht !== undefined
+      ? row.latest_unit_price_ht
+      : latestPricesMap.get(row.product_id);
+    const price = rawPrice === null || rawPrice === undefined ? null : Number(rawPrice);
+
+    return {
+      id: row.product_id,
+      code: row.code,
+      name: row.name,
+      type: row.type,
+      category: null,
+      unit: row.unit,
+      latestUnitPriceHt: price,
+      recipeStatus: "not_required",
+      componentCount: 0,
+      componentNames: [],
+      lotZone: null,
+      lotCode: null,
+      createdBy: emptyAuditActor,
+      updatedBy: emptyAuditActor,
+      schemaUpdatedBy: emptyAuditActor,
+      schemaUpdatedAt: null,
+      lastUpdated: row.updated_at,
+    };
+  });
 }
 
 export async function fetchSupplierMaterialAssignments(): Promise<Record<string, string[]>> {
@@ -2759,6 +2915,7 @@ export async function createReceptionBatch(input: ReceptionBatchInput): Promise<
       supplier_lot: line.supplierLot,
       quantity: line.quantity,
       unit: line.unit,
+      unit_price_ht: line.unitPriceHt ?? null,
       expiry_date: line.expiryDate,
       transport_temperature_c: line.transportTemperatureC,
       temperature_status: line.temperatureStatus,
@@ -2786,6 +2943,7 @@ export async function updateReceptionBatch(input: ReceptionBatchUpdateInput): Pr
       supplier_lot: line.supplierLot,
       quantity: line.quantity,
       unit: line.unit,
+      unit_price_ht: line.unitPriceHt ?? null,
       expiry_date: line.expiryDate,
       transport_temperature_c: line.transportTemperatureC,
       temperature_status: line.temperatureStatus,
@@ -2806,7 +2964,7 @@ export async function createReception(input: ReceptionInput) {
     findOrCreateSupplier(input.supplierName),
   ]);
 
-  const { error } = await supabase.rpc("create_raw_material_reception", {
+  const params: Record<string, any> = {
     p_reception_date: input.receptionDate,
     p_product_id: productId,
     p_supplier_id: supplierId,
@@ -2820,7 +2978,17 @@ export async function createReception(input: ReceptionInput) {
     p_nonconformity_reason: input.nonconformityReason,
     p_corrective_action: input.correctiveAction,
     p_observations: input.observations,
-  });
+  };
+  if (input.unitPriceHt !== undefined && input.unitPriceHt !== null) {
+    params.p_unit_price_ht = input.unitPriceHt;
+  }
+
+  let { error } = await supabase.rpc("create_raw_material_reception", params);
+  if (error && "p_unit_price_ht" in params && (error.code === "42883" || error.message.includes("p_unit_price_ht"))) {
+    const { p_unit_price_ht: _, ...fallbackParams } = params;
+    const fallback = await supabase.rpc("create_raw_material_reception", fallbackParams);
+    error = fallback.error;
+  }
 
   if (error) throw error;
 }
@@ -2946,15 +3114,13 @@ export async function deleteProductCatalogItem(productId: string) {
 export async function updateRawMaterialCatalogItem(productId: string, name: string, unit: string) {
   if (!supabase) throw new Error("Supabase is not configured.");
   const normalizedName = name.trim();
-  const { error } = await supabase
-    .from("products")
-    .update({
-      name: normalizedName,
-      unit,
-      code: makeProductCode(normalizedName),
-    })
-    .eq("id", productId);
+  const payload: Record<string, any> = {
+    name: normalizedName,
+    unit,
+    code: makeProductCode(normalizedName),
+  };
 
+  const { error } = await supabase.from("products").update(payload).eq("id", productId);
   if (error) throw error;
 }
 
@@ -2983,21 +3149,25 @@ async function findOrCreateRawProduct(name: string, unit: string) {
     .maybeSingle();
 
   if (existingError) throw existingError;
-  if (existing) return existing.id as string;
+  if (existing) {
+    return existing.id as string;
+  }
+
+  const insertPayload: Record<string, any> = {
+    code: makeProductCode(normalizedName),
+    name: normalizedName,
+    type: "raw",
+    unit,
+  };
 
   const { data, error } = await supabase
     .from("products")
-    .insert({
-      code: makeProductCode(normalizedName),
-      name: normalizedName,
-      type: "raw",
-      unit,
-    })
+    .insert(insertPayload)
     .select("id")
     .single();
 
   if (error) throw error;
-  return data.id as string;
+  return data!.id as string;
 }
 
 async function findOrCreateManufacturedProduct(name: string, type: Exclude<ProductType, "raw">, unit: string) {

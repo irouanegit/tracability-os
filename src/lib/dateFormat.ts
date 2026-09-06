@@ -7,6 +7,55 @@ const frenchDateTimeFormatter = new Intl.DateTimeFormat("fr-FR", {
   minute: "2-digit",
 });
 
+export function formatPriceMAD(amount: number | null | undefined): string {
+  if (amount === null || amount === undefined || !Number.isFinite(amount)) return "--";
+  return `${amount.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MAD`;
+}
+
+export function parseUnitPriceHt(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  const clean = value.replace(/,/g, ".").trim();
+  if (clean === "") return null;
+  const num = Number(clean);
+  return Number.isFinite(num) && num >= 0 ? num : null;
+}
+
+export function isValidUnitPriceHt(value: string | number | null | undefined): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0;
+  }
+  const clean = value.replace(/,/g, ".").trim();
+  if (clean === "") return true;
+  const num = Number(clean);
+  return Number.isFinite(num) && num >= 0;
+}
+
+export function calculateReceptionDraftTotalHt(
+  lines: Array<{ quantity: string | number; unitPriceHt?: string | number | null }>,
+): number {
+  return lines.reduce((sum, line) => {
+    const q = typeof line.quantity === "number" ? line.quantity : Number(String(line.quantity).replace(/,/g, ".").trim());
+    const p = parseUnitPriceHt(line.unitPriceHt);
+    return Number.isFinite(q) && q > 0 && p !== null ? sum + q * p : sum;
+  }, 0);
+}
+
+export function calculateReceptionGroupTotalHt(
+  batches: Array<{ totalPriceHt?: number | null }>,
+): number | null {
+  let total: number | null = null;
+  for (const batch of batches) {
+    if (batch.totalPriceHt != null && Number.isFinite(batch.totalPriceHt)) {
+      total = (total ?? 0) + batch.totalPriceHt;
+    }
+  }
+  return total;
+}
+
 export function fastFormatDateOnly(value: string): string | null {
   if (value.length === 10 && value.charCodeAt(4) === 45 && value.charCodeAt(7) === 45) {
     const y0 = value.charCodeAt(0);
